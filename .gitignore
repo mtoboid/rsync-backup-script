@@ -1,0 +1,4 @@
+# files to be ignored by git in the rsync_backup_script project folder
+
+# ignore the whole TESTING sandbox
+TESTING/*
