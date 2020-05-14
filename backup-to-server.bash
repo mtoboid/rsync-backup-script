@@ -44,18 +44,46 @@ function usage() {
     echo ""
 }
 
+################################################################################
+# Check if a program is available on the system.
+#
+# Arguments:
+#   $1 - name of the program/command [string]
+#
+# Returns:
+#   0 - (true) if the command is available
+#   1 - (false) if the command is NOT available
+#
+function is_installed() {
+    
+    if [[ -z "$1" ]]; then
+	echo "is_installed() Error: no argument provided!" >&2
+	exit 1
+    fi
+    local -r check_command="$1"
+    
+    if $(command -v "$check_command" >/dev/null); then
+	return 0
+    else
+	return 1
+    fi  
+}
 
+################################################################################
 # Parse the arguments provided to the script and set Global variables accordingly.
 # Also check the validity of the input when possible (local variables). Destinations
 # on the server are not being checked.
 #
 # Arguments:
 #   none
+#
 # Output:
 #   none - but sets the following
-# 'Main' Variables:
+#
+# Global Variables:
 #   DB_FOLDER_PATH
 #   DESTINATION_DIR
+#   DRY_RUN
 #   EXCLUDE_FILE
 #   KEEP_N_BACKUPS
 #   LOGFILE
@@ -212,8 +240,9 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     fi
 
     if [[ -z "$SERVER_ADDRESS" ]]; then
-	## user@server provided?
-	## check if '@' in SERVER_USER, and if so split SERVER_USER
+	## Was user@server provided?
+	## check if '@' in SERVER_USER, and if so
+	## split into 'SERVER_USER'@'SERVER_ADDRESS'
 	##
 	if [[ -n "${SERVER_USER//[^@]}" ]]; then
 	    SERVER_ADDRESS="${SERVER_USER#*@}"
@@ -230,12 +259,22 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 	echo "The provided MAC address ${SERVER_MAC} is not a valid MAC." >&2
 	exit 1
     fi
+
+    ## Insure that 'wakeonlan' is installed when a server mac is provided
+    ##
+    if (! is_installed wakeonlan); then
+	echo "A MAC address for the server was provided," \
+	     "implying that WakeOnLAN should be used." \
+	     "However, the package 'wakeonlan' does not seem to be installed." \
+	     "Please install it before proceeding 'apt install wakeonlan'" >&2
+	exit 1
+    fi
     
     readonly SERVER_USER
     readonly SERVER_ADDRESS
     readonly SERVER_MAC
     
-    ## 3) log
+    ## 3) Log
     ##
     if $USE_LOGFILE; then
 	if [[ -z "$LOGFILE" ]]; then
@@ -250,14 +289,14 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     readonly USE_LOGFILE
     readonly LOGFILE
 
-    ## 4) exclude file
+    ## 4) Exclude file
     ##
     if [[ ! -z "$EXCLUDE_FILE" ]] && [[ ! -r "$EXCLUDE_FILE" ]]; then
 	echo "Can't read exclude file: ${EXCLUDE_FILE}" >&2
 	exit 1
     fi
 
-    ## 5) settings with default values
+    ## 5) Settings with default values
     ##
     if [[ -z "$DB_FOLDER_PATH" ]]; then
 	echo "Error: db-folder path was unset." >&2
@@ -269,18 +308,101 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     fi
 
     if (( "$MAX_WAKEUP_WAIT" < 1 )); then
-	unset MAX_WAKEUP_WAIT
+	MAX_WAKEUP_WAIT=0
     fi
 
     readonly DB_FOLDER_PATH
     readonly KEEP_N_BACKUPS
     readonly MAX_WAKEUP_WAIT
 
+    ## Ensure 'libnotify-bin' is installed when notifications are requested
+    ##
+    if $SEND_NOTIFICATIONS && (! is_installed notify-send); then
+	echo "Notifications are enabled, but 'notify-send' is not available." \
+	     "Please install 'libnotify-bin' before proceeding." >&2
+	exit 1
+    fi
+    
     readonly SEND_NOTIFICATIONS
     readonly DRY_RUN
     
     return 0
 }
+
+################################################################################
+# Write a message to standard output, or to a logfile
+#
+# Arguments:
+#   The text to write (as in echo), \n will be interpreted as newline,
+#   but other escaped characters will not.
+#
+# Pipe / Stdin
+#   Text piped to the function will be appended after the arguments
+#
+# Global Variables:
+#   USE_LOGFILE
+#   LOGFILE
+#
+# Examples:
+#   message "this" "will" be in "one line"
+#   -> this will be in one line
+#   message "This is line 1\nwhile this is line 2."
+#   -> This is line 1
+#      while this is line 2.
+#   echo "This is from a pipe" | message
+#   -> This is from a pipe
+#   echo "pipe text\nwill be appended." | message "First text from arguments, then"
+#   -> First text from arguments, then
+#      pipe text
+#      will be appended.
+#
+function message() {
+    
+    declare -a text_message
+
+    ## If any arguments where passed, read them
+    ## 1. first as concatenated text (as is), and
+    ## 2. then put them into an array separated by newline.
+    ##    [discarding one space at the beginning of a line]
+    ##
+    if (( "$#" > 0 )); then 
+	while IFS= read -r arguments; do
+    	    while IFS=$'\n' read -r line; do
+    		text_message+=("${line## }")
+    	    done <<<"${arguments//\\n/$'\n'}"
+	done <<<"$@"
+    fi
+
+    ## If standard input is a pipe,
+    ## do the same as for the arguments, and append the
+    ## piped in text to messages from the arguments
+    ##
+    if [[ -p /dev/stdin ]]; then
+	while IFS= read -r pipe_text; do
+    	    while IFS=$'\n' read -r line; do
+    		text_message+=("${line# }")
+    	    done <<<"${pipe_text//\\n/$'\n'}"
+	done <<<"$(cat /dev/stdin)"
+    fi
+    
+    ## Write to log if USE_LOGFILE or otherwise to stdout.
+    ## When writing a log file only add the date (& time) for the first line of the entry.
+    ##
+    if $USE_LOGFILE; then
+    	local date_string=$(date +"%F %R:%S")
+    	for line in "${text_message[@]}"; do
+    	    printf '%19s |  %s\n' "$date_string" "$line" >> "$LOGFILE"
+    	    date_string=""    # only add the date to the first line.
+    	done
+	
+    else
+    	for line in "${text_message[@]}"; do
+    	    printf '%s\n' "$line"
+    	done
+    fi    
+}
+
+
 
 
 
@@ -313,8 +435,42 @@ function main() {
 
     parse_arguments "$@"
 
+    ## Show the chosen settings if --dry-run,
+    ## or write to log file if --log-file
+    ##
+    declare -a used_settings
 
+    used_settings+=("SETTINGS:\n")
+    used_settings+=("source directory    = ${SOURCE_DIR}\n")
+    used_settings+=("dest directory      = ${DESTINATION_DIR}\n")
+    used_settings+=("user                = ${SERVER_USER}\n")
+    used_settings+=("backup server       = ${SERVER_ADDRESS}\n")
+    [[ ! -z "$SERVER_MAC" ]] &&
+	used_settings+=("server mac address  = ${SERVER_MAC}\n")
+    [[ ! -z "$EXCLUDE_FILE" ]] &&
+	used_settings+=("rsync exclude file  = ${EXCLUDE_FILE}\n")
+    used_settings+=("max wakeup wait     = ${MAX_WAKEUP_WAIT}\n")
+    used_settings+=(">> on server >>\n")
+    used_settings+=("db folder path      = ${DB_FOLDER_PATH}\n")
+    used_settings+=("backups to keep     = ${KEEP_N_BACKUPS}\n")
+    [[ ! -z "$RSYNC_LOG_FILE" ]] &&
+	used_settings+=("rsync log file      = ${RSYNC_LOG_FILE}\n")
+    used_settings+=(">> other >>\n")
+    {
+	local state;
+	# notifications
+	$SEND_NOTIFICATIONS && state="enabled" || state="disabled";
+	used_settings+=("Sending of notifications is: ${state}\n");
+	# wakeonlan
+	[[ -z "$SERVER_MAC" ]] && state="disabled" || state="enabled"
+	used_settings+=("WakeOnLAN is:                ${state}\n");
+    }
 
+    ## Print settings to screen or to log
+    ##
+    if $DRY_RUN || $USE_LOGFILE; then
+	message "${used_settings[@]}"
+    fi
 
 
     
