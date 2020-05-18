@@ -70,6 +70,25 @@ function is_installed() {
 }
 
 ################################################################################
+# Send text to stderr and (if USE_LOGFILE=true) to the log file.
+#
+# Arguments:
+#   $1 -- text for the error message
+#
+# Returns:
+#   nothing
+#
+function error() {
+    local text="$1"
+    
+    echo "Error: ${text}" >&2
+    
+    if ($USE_LOGFILE); then
+	message "[ERROR]: " "${text}"
+    fi
+}
+
+################################################################################
 # Parse the arguments provided to the script and set Global variables accordingly.
 # Also check the validity of the input when possible (local variables). Destinations
 # on the server are not being checked.
@@ -96,13 +115,17 @@ function is_installed() {
 #   SOURCE_DIR
 #   USE_LOGFILE
 #
+# Returns:
+#   0 - success - all arguments were successfully parsed,
+#                 and settings are valid
+#   1 - on error
+#   2 - invalid setting
+#
 function parse_arguments() {
 
-    echo "Entering function parse_arguments()"  # XXX
-
     if [[ -z "$1" ]]; then
-	echo "No arguments provided, see ${0} --help for usage." >&2
-	exit 1
+	error "No arguments provided, see ${0} --help for usage."
+	return 1
     fi
     
     local arguments
@@ -115,8 +138,8 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 		       --name "$0" -- "$@")
     
     if (( "$?" != 0 )); then
-        echo "Error while parsing arguments." >&2
-	exit 1
+        error "Unexpected getopt error while  parsing arguments."
+	return 1
     fi
 
     eval set -- "$arguments"
@@ -193,8 +216,8 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 		break
 		;;
 	    *)
-		echo "Internal error!" >&2
-		exit 1
+		error "Internal error! (parsing arguments)"
+		return 1
 		;;
 	esac
     done    
@@ -211,19 +234,19 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     ## 1) SRC and DEST
     ##
     if [[ -z "$SOURCE_DIR" ]]; then
-	echo "No SRC specified, see ${0} --help for usage." >&2
-	exit 1
+	error "No SRC specified, see ${0} --help for usage."
+	return 2
     elif [[ ! -d "$SOURCE_DIR" ]]; then
-	echo "Source dir ${SOURCE_DIR} not found." >&2
-	exit 1
+	error "Source dir ${SOURCE_DIR} not found."
+	return 2
     elif [[ ! -r "$SOURCE_DIR" ]] || [[ ! -x "$SOURCE_DIR" ]]; then
-	echo "No read permission for SRC - ${SOURCE_DIR}" >&2
-	exit 1
+	error "No read permission for SRC - ${SOURCE_DIR}"
+	return 2
     fi
 
     if [[ -z "$DESTINATION_DIR" ]]; then
-	echo "No DEST specified, see ${0} --help for usage." >&2
-	exit 1
+	error "No DEST specified, see ${0} --help for usage."
+	return 2
     fi
 
     ## remove trailing slashes from DEST if present
@@ -238,36 +261,32 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     if [[ -z "$SERVER_USER" ]]; then
 	SERVER_USER="${USER}"
     fi
-
-    if [[ -z "$SERVER_ADDRESS" ]]; then
-	## Was user@server provided?
-	## check if '@' in SERVER_USER, and if so
-	## split into 'SERVER_USER'@'SERVER_ADDRESS'
-	##
-	if [[ -n "${SERVER_USER//[^@]}" ]]; then
-	    SERVER_ADDRESS="${SERVER_USER#*@}"
-	    SERVER_USER="${SERVER_USER%@*}"
-	else
-	    SERVER_ADDRESS="localhost"
-	fi
+    
+    ## Was user@server provided?
+    ## check if '@' in SERVER_USER, and if so
+    ## split into 'SERVER_USER'@'SERVER_ADDRESS'
+    ##
+    if [[ -z "$SERVER_ADDRESS" ]] && [[ -n "${SERVER_USER//[^@]}" ]]; then
+	SERVER_ADDRESS="${SERVER_USER#*@}"
+	SERVER_USER="${SERVER_USER%@*}"
     fi
 
     declare -r mac_regex='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$'
     if [[ ! -z "$SERVER_MAC" ]] &&
 	   (( $(echo "${SERVER_MAC}" | grep -cP "$mac_regex") != 1 ))
     then
-	echo "The provided MAC address ${SERVER_MAC} is not a valid MAC." >&2
-	exit 1
+	error "The provided MAC address ${SERVER_MAC} is not a valid MAC."
+	return 2
     fi
 
     ## Insure that 'wakeonlan' is installed when a server mac is provided
     ##
     if (! is_installed wakeonlan); then
-	echo "A MAC address for the server was provided," \
+	error "A MAC address for the server was provided," \
 	     "implying that WakeOnLAN should be used." \
 	     "However, the package 'wakeonlan' does not seem to be installed." \
-	     "Please install it before proceeding 'apt install wakeonlan'" >&2
-	exit 1
+	     "Please install it before proceeding 'apt install wakeonlan'"
+	return 1
     fi
     
     readonly SERVER_USER
@@ -276,13 +295,13 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     
     ## 3) Log
     ##
-    if $USE_LOGFILE; then
+    if ( $USE_LOGFILE ); then
 	if [[ -z "$LOGFILE" ]]; then
-	    echo "No logfile provided see ${0} for usage." >&2
-	    exit 1
+	    error "No logfile provided see ${0} for usage."
+	    return 2
 	elif ( ! touch "$LOGFILE" &>/dev/null ); then
-	    echo "Can't create or write to logfile: ${LOGFILE}." >&2
-	    exit 1
+	    error "Can't create or write to logfile: ${LOGFILE}."
+	    return 1
 	fi
     fi
     
@@ -292,15 +311,15 @@ max-wake-wait:,db-path:,keep-n-backups:'\
     ## 4) Exclude file
     ##
     if [[ ! -z "$EXCLUDE_FILE" ]] && [[ ! -r "$EXCLUDE_FILE" ]]; then
-	echo "Can't read exclude file: ${EXCLUDE_FILE}" >&2
-	exit 1
+	error "Can't read exclude file: ${EXCLUDE_FILE}"
+	return 1
     fi
 
     ## 5) Settings with default values
     ##
     if [[ -z "$DB_FOLDER_PATH" ]]; then
-	echo "Error: db-folder path was unset." >&2
-	exit 1
+	error "Invalid setting: db-folder path was unset."
+	return 1
     fi
 
     if (( "$KEEP_N_BACKUPS" < 0 )); then
@@ -317,14 +336,21 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 
     ## Ensure 'libnotify-bin' is installed when notifications are requested
     ##
-    if $SEND_NOTIFICATIONS && (! is_installed notify-send); then
-	echo "Notifications are enabled, but 'notify-send' is not available." \
-	     "Please install 'libnotify-bin' before proceeding." >&2
-	exit 1
+    if ( $SEND_NOTIFICATIONS ) && (! is_installed notify-send); then
+	error "Notifications are enabled, but 'notify-send' is not available." \
+	      "Please install 'libnotify-bin' before proceeding."
+	return 1
     fi
     
     readonly SEND_NOTIFICATIONS
     readonly DRY_RUN
+
+    ## Ensure rsync is installed
+    ##
+    if (! is_installed rsync); then
+	error "Did not find 'rsync', please install it before proceeding."
+	return 1
+    fi
     
     return 0
 }
@@ -340,8 +366,12 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 #   Text piped to the function will be appended after the arguments
 #
 # Global Variables:
+#   DRY_RUN
 #   USE_LOGFILE
 #   LOGFILE
+#
+# Output:
+#   Text written to screen OR to log file.
 #
 # Examples:
 #   message "this" "will" be in "one line"
@@ -388,7 +418,16 @@ function message() {
     ## Write to log if USE_LOGFILE or otherwise to stdout.
     ## When writing a log file only add the date (& time) for the first line of the entry.
     ##
-    if $USE_LOGFILE; then
+    if ($DRY_RUN && $USE_LOGFILE); then
+	local date_string=$(date +"%F %R:%S")
+	echo "Would be written to: ${LOGFILE}"
+	echo ""
+    	for line in "${text_message[@]}"; do
+    	    printf '%19s |  %s\n' "$date_string" "$line"
+    	    date_string=""    # only add the date to the first line.
+    	done
+	
+    elif ($USE_LOGFILE); then
     	local date_string=$(date +"%F %R:%S")
     	for line in "${text_message[@]}"; do
     	    printf '%19s |  %s\n' "$date_string" "$line" >> "$LOGFILE"
@@ -402,39 +441,34 @@ function message() {
     fi    
 }
 
-
-
-
-
-
-function main() {
-    echo "Entering function main()"  # XXX
-
-    declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
-    declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
-    local DB_FOLDER_PATH=".backup_db"   # path on server, file with backup dates for decision
-                                        # which to delete next
-    
-    ## 'Global' Variables set by parse_arguments()
-    ##
-    local SOURCE_DIR
-    local DESTINATION_DIR
-    local EXCLUDE_FILE
-    local SERVER_USER
-    local SERVER_ADDRESS
-    local SERVER_MAC
-    local USE_LOGFILE=false
-    local LOGFILE
-    local RSYNC_LOG_FILE
-    local SEND_NOTIFICATIONS=false
-    local DRY_RUN=false
-
-    ## container for the lock code (sleep-lock on server)
-    ##
-    local sleep_lock_code
-
-    parse_arguments "$@"
-
+################################################################################
+# Print the current settings to screen or to log file.
+#
+# Arguments:
+#   none
+#
+# Global Variables:
+#   DB_FOLDER_PATH
+#   DESTINATION_DIR
+#   DRY_RUN
+#   EXCLUDE_FILE
+#   KEEP_N_BACKUPS
+#   LOGFILE
+#   MAX_WAKEUP_WAIT
+#   RSYNC_LOG_FILE
+#   SEND_NOTIFICATIONS
+#   SERVER_ADDRESS
+#   SERVER_MAC
+#   SERVER_USER
+#   SOURCE_DIR
+#   USE_LOGFILE
+#
+# Output:
+#   if USE_LOGFILE=true -- to log file ($LOGFILE)
+#   if DRY_RUN=true     -- only to screen (even if USE_LOGFILE=true)
+#   else none
+#
+function print_settings() {
     ## Show the chosen settings if --dry-run,
     ## or write to log file if --log-file
     ##
@@ -463,17 +497,435 @@ function main() {
 	used_settings+=("Sending of notifications is: ${state}\n");
 	# wakeonlan
 	[[ -z "$SERVER_MAC" ]] && state="disabled" || state="enabled"
-	used_settings+=("WakeOnLAN is:                ${state}\n");
+	used_settings+=("WakeOnLAN is:                ${state}");
     }
 
     ## Print settings to screen or to log
     ##
-    if $DRY_RUN || $USE_LOGFILE; then
+    ($DRY_RUN) && echo ""
+    if ($DRY_RUN || $USE_LOGFILE); then
 	message "${used_settings[@]}"
     fi
+    ($DRY_RUN) && echo ""
 
+    return 0
+}    
 
+################################################################################
+# Check if the specified server is reachable and ssh is listening on port 22.
+# If necessary wake it via wakeonlan, if a MAC is provided as second argument. 
+#
+# Arguments:
+#   $1 - the hostname or ip address of the server
+#   $2 - the MAC address of the network device for wakeonlan [optional]
+#
+# Global Variables:
+#   MAX_WAKEUP_WAIT
+#
+# Returns:
+#   0 - success - when server is reachable
+#   1 - failure - when server is NOT reachable
+#
+function server_is_reachable() {
+
+    local hostname
+    local mac_address
+
+    if [[ -z "$1" ]]; then
+	echo "server_is_reachable() Error: no hostname provided." >&2
+	exit 1
+    fi
+
+    readonly hostname="$1"
+    readonly mac_address="$2"
+
+    ## 1) Check that network interface is working
+    ##
+    if ( ! ping -c 1 localhost &>/dev/null ); then
+	error "Problem with network settings, can't reach localhost!"
+	return 1
+    fi
+
+    ## 2) Insure that server is online
+    ##
+    local server_online=false
     
+    if (ping -c 3 "$hostname"); then
+	server_online=true
+    fi
+    
+    ## 2a) Wake up if WakeOnLAN enabled
+    ##
+    if ( ! $server_online ) && [[ ! -z "$mac_address" ]]; then
+	message "Server not reachable, trying to wake it up."
+	
+	declare -i counter=0
+	while ( ! $server_online ) && (( counter <= $MAX_WAKEUP_WAIT )); do
+	    wakeonlan "$mac_address" &>/dev/null
+	    sleep 2
+	    (( counter++ ))
+	    if ( ping -c 3 "$hostname" &>/dev/null ); then
+		server_online=true
+	    fi
+	done
+    fi
+
+    ## Check final reachability
+    ##
+    if ( $server_online ); then
+	message "Server at ${hostname} is reachable."
+    else
+	error "Failed to connect to server."
+	return 1
+    fi
+
+    ### FIXME not needed when localhost
+    ## 3) make sure ssh is working
+    ##
+    if ( ! nc -zw 2 "$hostname" 22 &>/dev/null ); then
+	error "No ssh service detected on port 22 of ${hostname}."
+	return 1
+    fi
+
+    return 0
+}
+
+################################################################################
+# Execute the passed commands either on a server via ssh,
+# or on the current machine.
+#
+# Arguments:
+#   $1 - The commands to execute [string]
+#
+# Global Variables:
+#   SERVER_USER
+#   SERVER_ADDRESS
+#
+# Returns:
+#   The exit status of the last command run on the server.
+#
+function execute_on_host() {
+
+    if [[ -z "$1" ]]; then
+	echo "execute_on_host() Error: no argument provided!" >&2
+	exit 1
+    fi
+    
+    declare -r exec_command="$1"
+    declare -a use_command
+
+    ## Switch between local and ssh use
+    ## (to test $SERVER_USER here is ok, as this should be set to
+    ##  $USER by parse_arguments() if not specified explicitly.)
+    ##
+    if [[ ! -z "$SERVER_ADDRESS" ]] && [[ ! -z "$SERVER_USER" ]]; then
+	use_command=(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}")
+    else
+	use_command=(bash -c)
+    fi
+    
+    "${use_command[@]}" "eval '${exec_command}'"
+    
+    return
+}
+
+################################################################################
+# Setup everything on the host so that the rsync command can run.
+# Ensure all directories & files needed are present & accessabe on the host.
+# Also move logfiles to next number and delete old ones. 
+#
+# Arguments:
+#   none
+#
+# Global Variables:
+#   DB_FOLDER_PATH
+#   DESTINATION_DIR
+#   RSYNC_LOG_FILE
+#   backup_folder
+#   current_folder
+#   db_file
+#
+# Depends:
+#   execute_on_host()
+#
+# Returns:
+#   Exit status of last command run on host
+#
+function pre_backup_setup() {
+
+    local cmd_string
+
+    ## Ensure that following exist:
+    ## > the folder and file for the backup-db
+    ## > the folder structure for the rsync backups
+    ##   <DESTINATION_DIR>--+--current
+    ##                      |
+    ##                      +--old
+    ## [if logging on the server is enabled]
+    ## > the folder for the rsync logs on the server
+    ## > (additionally) move logs to keep the last 10
+    ##
+    read -r -d '' cmd_string <<-EOF    
+    ## utility function to save some code
+    ##
+    function ensure_exists() {
+    	if [[ -z "\$1" ]]; then
+    	   echo "ensure_exists() Error: no argument passed!" >&2
+    	   exit 1
+    	fi
+    	local directory="\$1"
+
+	if [[ -e "\${directory}" ]] && [[ ! -d "\${directory}" ]]; then
+    	    echo "Error: \${directory} does exist but is no directory." >&2
+    	    exit 1
+	else
+	    mkdir -p "\${directory}" ||
+	    { echo "Error creating directory \${directory}."; exit 1; }
+	fi
+	return 0
+    }
+
+    ## backup-db
+    ##    
+    ensure_exists "${DB_FOLDER_PATH}"
+    touch "${db_file}"
+    if [[ ! -r "$db_file" ]] || [[ ! -w "$db_file" ]]; then 
+    	echo "Error no read/write permission for ${db_file}" >&2
+        exit 1
+    fi
+
+    ## rsync folder-structure
+    ##
+    ensure_exists "${DESTINATION_DIR}/${current_folder}"
+    ensure_exists "${DESTINATION_DIR}/${backup_folder}"
+
+    ## logging on the server:
+    ##
+    if [[ ! -z "$RSYNC_LOG_FILE" ]]; then
+    	## ensure log dir exists
+    	##
+    	ensure_exists "${RSYNC_LOG_FILE%/*}"
+    	## move logs to keep 10 (remove nr. 10)
+    	##
+    	if [[ -e "${RSYNC_LOG_FILE}.10" ]]; then
+    	    rm "${RSYNC_LOG_FILE}.10" ||
+    		{ echo "Error removing logfile ${RSYNC_LOG_FILE}.10" >&2; exit 1; }
+    	fi
+    	## move existing logs one number up
+    	##
+    	for i in {9..0} ; do
+    	    if [[ -e "${RSYNC_LOG_FILE}.\$i" ]]; then
+    		mv "${RSYNC_LOG_FILE}.\$i" "${RSYNC_LOG_FILE}.\$((\$i + 1))" ||
+    		    { echo "Error moving logfile ${RSYNC_LOG_FILE}.\$1 to \$((\$i + 1))" >&2; exit 1; }
+    	    fi
+    	done
+    	## move current log to number 0
+    	##
+    	if [[ -e "${RSYNC_LOG_FILE}" ]]; then
+    	    mv "${RSYNC_LOG_FILE}" "${RSYNC_LOG_FILE}.0" ||
+    		{ echo "Error moving logfile ${RSYNC_LOG_FILE} to .0" >&2; exit 1; }
+    	fi
+    fi
+''
+EOF
+
+    execute_on_host "${cmd_string}" | message
+    
+    return
+}
+
+################################################################################
+# Run rsync with the specified options set.
+#
+# Arguments:
+#   none
+#
+# Global Variables:
+#   DESTINATION_DIR
+#   EXCLUDE_FILE
+#   RSYNC_LOG_FILE
+#   SERVER_ADDRESS
+#   SERVER_USER
+#   SOURCE_DIR
+#   backup_folder
+#   current_date
+#   current_folder
+#
+# Returns:
+#   The exit status of the rsync command.
+#
+function run_rsync() {
+
+    declare -a rsync_opts
+    
+    ## Build the options for rsync
+    ## Note append arguments separately to options as e.g.
+    ## +=("--delete --delete-excluded") would be parsed as a single argument,
+    ## use +=("--delete" "--delete-excluded") -- note the double quotes!
+
+    ## Archive and compress
+    ##
+    rsync_opts+=("-az")
+
+    ## Honour an exclude file if provided
+    ##
+    [[ ! -z "$EXCLUDE_FILE" ]] &&
+	rsync_opts+=("--exclude-from=${EXCLUDE_FILE}")
+
+    ## Set to delete and make backups
+    ## to achive wanted behaviour for incremental backups
+    ##
+    rsync_opts+=("--delete" "--delete-excluded" "--delete-delay")
+    rsync_opts+=("--backup" "--backup-dir=../${backup_folder}/${current_date}")
+
+    ## If logging for the rsync process is wanted to that on the host.
+    ## Set the log file path differently when not making backups to a remote server
+    ##
+    if [[ ! -z "$RSYNC_LOG_FILE" ]]; then
+	if [[ ! -z "$SERVER_ADDRESS" ]]; then
+	    rsync_opts+=("--remote-option=--log-file=${RSYNC_LOG_FILE}")
+	else
+	    rsync_opts+=("--log-file=${RSYNC_LOG_FILE}")
+	fi
+    fi
+
+    ## Set SRC, and DEST according to if making a local or a remote backup
+    ##
+    rsync_opts+=("${SOURCE_DIR}")
+    
+    if [[ ! -z "$SERVER_ADDRESS" ]]; then
+	rsync_opts+=("${SERVER_USER}@${SERVER_ADDRESS}:${DESTINATION_DIR}/${current_folder}")
+    else
+	rsync_opts+=("${DESTINATION_DIR}/${current_folder}")
+    fi
+
+    ## Run rsync with the set options
+    ##
+    rsync "${rsync_opts[@]}"
+    
+    return
+}
+
+
+
+
+### TODO ###
+function post_backup_cleanup() {
+    return 0
+}
+
+
+
+function main() {
+    echo "Entering function main()"  # XXX
+
+    declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
+    declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
+    local DB_FOLDER_PATH=".backup_db"   # path on server, file with backup dates for decision
+                                        # which to delete next
+    local backup_folder="old"           # name for the subfolder with the kept dates
+    local current_folder="current"      # name for the subfolder with the most up to date backup
+    local current_date=$(date +"%Y-%m-%d")
+    readonly backup_folder
+    readonly current_folder
+    readonly current_date
+    
+    ## 'Global' Variables set by parse_arguments()
+    ##
+    local SOURCE_DIR
+    local DESTINATION_DIR
+    local EXCLUDE_FILE
+    local SERVER_USER
+    local SERVER_ADDRESS
+    local SERVER_MAC
+    local USE_LOGFILE=false
+    local LOGFILE
+    local RSYNC_LOG_FILE
+    local SEND_NOTIFICATIONS=false
+    local DRY_RUN=false
+
+    ## Container for the lock code (sleep-lock on server)  XXX put as global and trap on exit??
+    ##
+    local sleep_lock_code
+
+    ## ensure rsync is installed
+    ##
+    if (! is_installed rsync); then
+	error "No rsync found, please run 'apt install rsync' before continuing."
+	exit 1
+    fi
+    
+    ## Set variables according to arguments and check their validity
+    ##
+    parse_arguments "$@"
+
+    if (( "$?" != 0 )); then
+	error "while parsing arguments."
+	exit 1
+    fi
+    
+
+    ## Print settings to log (or to sreen if --dry-run)
+    ##
+    print_settings
+
+    ## Make sure we can reach the server, (and ssh is enabled)
+    ##
+    if ( ! server_is_reachable "$SERVER_ADDRESS" "$SERVER_MAC" ); then
+	error "could not connect to server." >&2
+	exit 1
+    fi
+
+    ## Setup everything for the backup
+    ## 
+
+    ## For incremental backups (rsync with backup and --backup-dir)
+    ## with a 'rolling cycle' (only keeping the last 'n' backups)
+    ## but kept in folders labeled by date, it is necessary to store a file with
+    ## the file names (= dates) of previously performed and kept backups.
+    ## Entries will be appended to this file, and if the list gets longer than
+    ## 'n' entries, folders matching the string from the top of the file will be
+    ## deleted.
+    ## From a design perspective this 'database structure' is envisaged to have two levels:
+    ## 1) a folder with the same name as the backing up client ($HOSTNAME) which is
+    ##    added outside this script in the calling script to retain flexibility for
+    ##    other possible setups.
+    ## and within this
+    ## 2) backup.history files to store the dates for backups (folders in 'old')
+    ## Of these, more than one file would only be needed if two different types of backup are
+    ## being run to the same server (e.g. one for /home/betty and another for /home/joe).
+    ## In this way (if clientnames are unique) using the SRC and DEST to build the filename
+    ## for the db_file ensures unambiguous db names.
+    ##
+    local db_file
+    db_file="${DB_FOLDER_PATH}/${SOURCE_DIR//\/%%}@@${DESTINATION_DIR//\/%%}.backup.history"
+    readonly db_file
+
+    ## TODO enable sleep lock TODO
+    pre_backup_setup
+
+    if (( "$?" != 0 )); then
+	error "while checking pre-requisites on host."
+	exit 1
+    fi
+
+    ## Make the backup via rsync
+    ##
+    run_rsync
+
+    if (( "$?" != 0 )); then
+	error "rsync finished with exit status $?."
+	exit 1
+    else
+	message "Backup: rsync finished successfully."
+    fi
+
+    ## Update the database and delete the oldest backup
+    ##
+    post_backup_cleanup
+
+    ## TODO disable sleep lock ##
+
     
     exit 0
 }
