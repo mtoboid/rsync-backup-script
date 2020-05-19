@@ -17,7 +17,8 @@
 # and if asleep will be woken up.
 # For the script to work ssh login on the server via a key-pair has to be set up.
 #
-
+# attribution for notify icon
+# Icons made by <a href="https://www.flaticon.com/authors/freepik" title="Freepik">Freepik</a> from <a href="https://www.flaticon.com/" title="Flaticon"> www.flaticon.com</a>
 # NOTE: careful with ssh using <<EOF as the send command will be send
 #       as text, which means that variables which are not escaped will be
 #       resolved at the local machine and send as text to the server,
@@ -33,15 +34,47 @@
 
 readonly VERSION=1.2
 
-#function cleanup
+################################################################################
+# Things to check even on an uncontrolled exit
+#
+# - if a sleep-lock is set on the server -> release it
+#
+function cleanup() {
+    if [[ ! -z $USE_SLEEPLOCK ]] &&
+	   $USE_SLEEPLOCK &&
+	   [[ ! -z "$sleep_lock_code" ]]
+    then	
+	    ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock release ${sleep_lock_code}"
+    fi
+}
 
+trap cleanup EXIT
+    
 
-
-
+## TODO ##
 function usage() {
     echo "Usage:"
     echo "TEXT"
     echo ""
+}
+
+################################################################################
+# Send text to stderr and (if USE_LOGFILE=true) to the log file.
+#
+# Arguments:
+#   $1 -- text for the error message
+#
+# Returns:
+#   nothing
+#
+function error() {
+    local text="$1"
+    
+    echo "Error: ${text}" >&2
+    
+    if ($USE_LOGFILE); then
+	message "[ERROR]: " "${text}"
+    fi
 }
 
 ################################################################################
@@ -70,25 +103,6 @@ function is_installed() {
 }
 
 ################################################################################
-# Send text to stderr and (if USE_LOGFILE=true) to the log file.
-#
-# Arguments:
-#   $1 -- text for the error message
-#
-# Returns:
-#   nothing
-#
-function error() {
-    local text="$1"
-    
-    echo "Error: ${text}" >&2
-    
-    if ($USE_LOGFILE); then
-	message "[ERROR]: " "${text}"
-    fi
-}
-
-################################################################################
 # Parse the arguments provided to the script and set Global variables accordingly.
 # Also check the validity of the input when possible (local variables). Destinations
 # on the server are not being checked.
@@ -113,6 +127,7 @@ function error() {
 #   SERVER_USER
 #   SOURCE_DIR
 #   USE_LOGFILE
+#   USE_SLEEPLOCK
 #
 # Returns:
 #   0 - success - all arguments were successfully parsed,
@@ -132,7 +147,7 @@ function parse_arguments() {
 		       --longoptions 'version,help,\
 server-user:,server-address:,server-mac:,\
 exclude-file:,log-file:,rsync-log-file:,\
-send-notifications,dry-run,\
+send-notifications,dry-run,use-sleeplock\
 max-wake-wait:,keep-n-backups:'\
 		       --name "$0" -- "$@")
     
@@ -202,6 +217,11 @@ max-wake-wait:,keep-n-backups:'\
 		;;
 	    '--dry-run')
 		DRY_RUN=true
+		shift
+		continue
+		;;
+	    '--use-sleeplock')
+		USE_SLEEPLOCK=true
 		shift
 		continue
 		;;
@@ -286,6 +306,14 @@ max-wake-wait:,keep-n-backups:'\
     readonly SERVER_USER
     readonly SERVER_ADDRESS
     readonly SERVER_MAC
+
+    ## If the backup is local or the server is not woken, ignore
+    ## an enabled sleeplock setting
+    ##
+    if [[ -z "$SERVER_ADDRESS" ]] || [[ -z "$SERVER_MAC" ]]; then
+	USE_SLEEPLOCK=false
+    fi
+    readonly USE_SLEEPLOCK
     
     ## 3) Log
     ##
@@ -430,6 +458,113 @@ function message() {
 }
 
 ################################################################################
+# Send a notification to the user via a popup.
+# Produces a notification popup for the currently logged-in user who
+# is using a display.
+#
+# Depends:
+#   notify-send
+#
+# Arguments:
+#   $1 - Summary (the 'header' shown) for the notification [string]
+#   $2 - Body of the notification message [string]
+#
+# Global Variables:
+#   DISPLAY
+#   DBUS_SESSION_BUS_ADDRESS
+#
+# Output:
+#   none (apart from the popup)
+#
+function notification() {
+
+    local summary
+    local body
+
+    if [[ -z "$1" ]] || [[ -z "$2" ]]; then
+	echo "notification() Error: not enough arguments passed!"
+	exit 1
+    fi
+
+    readonly summary="$1"
+    readonly body="$2"
+
+    ## Under certain circumstances it can happen that for the user running
+    ## this script DISPLAY or DBUS_SESSION_BUS_ADDRESS are not set.
+    ## (e.g. when running as an anacron job)
+    ## Therefore, we test if those are set and if not, try to assign
+    ## the display and dbus_session_bus_address of a/the logged in user.
+    ## Note:
+    ## Especially were the dbus for the user is registered varies between
+    ## different DEs (Distros?) and I am not sure if the approach immplemented
+    ## here will work for all, so this might be a FIXME.
+    ##
+    local active_display
+    local user
+    local uid
+    local dbus_session_bus_address
+    
+    if [[ -z "$DISPLAY" ]] || [[ -z "$DBUS_SESSION_BUS_ADDRESS" ]]; then
+	
+	## Check if the glob pattern matches anything at all
+	##
+	if ( ! compgen -G /tmp/.X11-unix/X* >/dev/null ); then
+	    error "could not find display for notification. [notification]"
+	    return 1
+	fi
+	local connected_displays
+	connected_displays=(/tmp/.X11-unix/X*)
+
+	## Look which of the connected displays is assigned to a user
+	##
+	for display in "${connected_displays[@]##*/}"; do
+	    if (( $(who | grep -c "${display/X/:}") > 0 )); then
+		active_display="${display/X/:}"
+		user=$(who | grep "(${active_display})" | awk '{print $1}')
+		uid=$(id -u "$user")
+		(( "$?" == 0 )) && break
+	    fi
+	done
+
+	## Ensure we got a uid, otherwise we can't continue
+	##
+	if [[ -z "$uid" ]]; then
+	    error "could not determine which display is assigned to a user. [notification]"
+	    return 1
+	fi
+
+	## Set the dbus to use
+	##
+	if [[ -S "/run/user/${uid}/bus" ]]; then
+	    dbus_session_bus_address="unix:path=/run/user/${uid}/bus"
+	    
+	elif [[ -f "/run/user/${uid}/dbus-session" ]]; then
+	    dbus_session_bus_address=$(sed -r 's/DBUS_SESSION_BUS_ADDRESS=(.*)/\1/' \
+ 					   "/run/user/$uid/dbus-session")
+	else
+	    error "could not find the correct dbus_session_bus_address. [notification]"
+	    return 1
+	fi
+    else
+	active_display="$DISPLAY"
+	dbus_session_bus_address="$DBUS_SESSION_BUS_ADDRESS"
+    fi
+
+    ## Send a notification in a subshell, where the parameters are
+    ## ensured to be set.
+    ##
+    (
+	DISPLAY="$active_display"
+	DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address"
+	notify-send --icon=drive-harddisk "$summary" "$body"
+    )
+    
+    return 0
+}
+
+
+
+################################################################################
 # Print the current settings to screen or to log file.
 #
 # Arguments:
@@ -483,7 +618,10 @@ function print_settings() {
 	used_settings+=("Sending of notifications is: ${state}\n");
 	# wakeonlan
 	[[ -z "$SERVER_MAC" ]] && state="disabled" || state="enabled"
-	used_settings+=("WakeOnLAN is:                ${state}");
+	used_settings+=("WakeOnLAN is:                ${state}\n");
+	# sleep-lock
+	$USE_SLEEPLOCK && state="enabled" || state="disabled"
+	used_settings+=("Setting a sleep-lock is:     ${state}\n");
     }
 
     ## Print settings to screen or to log
@@ -618,7 +756,8 @@ function execute_on_host() {
 ################################################################################
 # Setup everything on the host so that the rsync command can run.
 # Ensure all directories & files needed are present & accessabe on the host.
-# Also move logfiles to next number and delete old ones. 
+# Also move logfiles to next number and delete old ones.
+# Enable a sleep-lock if requested.
 #
 # Arguments:
 #   none
@@ -626,8 +765,10 @@ function execute_on_host() {
 # Global Variables:
 #   DESTINATION_DIR
 #   RSYNC_LOG_FILE
+#   USE_SLEEPLOCK
 #   backup_folder
 #   current_folder
+#   sleep_lock_code
 #
 # Depends:
 #   execute_on_host()
@@ -638,7 +779,23 @@ function execute_on_host() {
 function pre_backup_setup() {
 
     local cmd_string
+    local lock_state
 
+    ## Enable a sleep lock on the server and save the code
+    ##
+    if $USE_SLEEPLOCK; then
+	sleep_lock_code=$(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock enable")
+	lock_state=$(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock check $sleep_lock_code")
+	## Check that setting successful
+	##
+	if [[ "$lock_state" == "active" ]]; then
+	    message "Enabled sleep lock on server, code: $sleep_lock_code"
+	else
+	    error "Could not enable sleep lock for server."
+	    return 1
+	fi
+    fi
+    
     ## Ensure that following exist:
     ## > the folder and file for the backup-db
     ## > the folder structure for the rsync backups
@@ -781,12 +938,9 @@ function run_rsync() {
     return
 }
 
-
-
-
 ################################################################################
 # Delete old incremental backups (rsync --backup) if more than specified
-# are present on the host.
+# are present on the host; Disable a sleep-lock if set.
 #
 # Arguments:
 #   none
@@ -794,16 +948,20 @@ function run_rsync() {
 # Global Variables:
 #   DESTINATION_DIR
 #   KEEP_N_BACKUPS
+#   USE_SLEEPLOCK
 #   backup_folder
+#   sleep_lock_code
 #
 # Depends:
 #   execute_on_host()
 #
 # Returns:
-#   Exit status of last command run on host
+#   Exit status of the last command run on host
 #
 function post_backup_cleanup() {
 
+    declare -i exit_status=0
+    local lock_state
     local cmd_string
 
     ## Remove old backups if present on the host
@@ -837,8 +995,23 @@ function post_backup_cleanup() {
 EOF
 
     execute_on_host "${cmd_string}" | message
+    exit_status="${PIPESTATUS[0]}"
+
+    ## Disable a sleep-lock if set
+    ##
+    if $USE_SLEEPLOCK; then
+	ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock release ${sleep_lock_code}"
+	lock_state=$(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock check ${sleep_lock_code}")
+	# check that successful
+	if [[ "$lock_state" == "inactive" ]]; then
+	    unset sleep_lock_code
+	else
+	    error "Could not release sleep lock for server"
+	    exit_status=1
+	fi
+    fi
     
-    return "${PIPESTATUS[0]}"
+    return $exit_status
 }
 
 
@@ -868,19 +1041,12 @@ function main() {
     local RSYNC_LOG_FILE
     local SEND_NOTIFICATIONS=false
     local DRY_RUN=false
-
-    ## Container for the lock code (sleep-lock on server)  XXX put as global and trap on exit??
-    ##
+    local USE_SLEEPLOCK=false
+    # container for the sleep lock code, not set by parse_arguments()
     local sleep_lock_code
-
-    ## ensure rsync is installed
-    ##
-    if (! is_installed rsync); then
-	error "No rsync found, please run 'apt install rsync' before continuing."
-	exit 1
-    fi
     
-    ## Set variables according to arguments and check their validity
+    ## Set variables according to arguments and check their validity.
+    ## Also check that all needed dependencies are installed.
     ##
     parse_arguments "$@"
 
@@ -890,25 +1056,25 @@ function main() {
     fi
     
 
-    ## Print settings to log (or to sreen if --dry-run)
+    ## Print settings to log (or to screen if --dry-run)
     ##
     print_settings
 
+    
     ## Make sure we can reach the server, (and ssh is enabled)
     ##
     if ( ! server_is_reachable "$SERVER_ADDRESS" "$SERVER_MAC" ); then
-	error "could not connect to server." >&2
+	error "could not connect to server."
 	exit 1
     fi
 
     ## Setup everything for the backup
+    ## [ enable sleep_lock ]
     ## 
-
-    ## TODO enable sleep lock TODO
     pre_backup_setup
 
     if (( "$?" != 0 )); then
-	error "while checking pre-requisites on host."
+	error "while setting pre-requisites on host."
 	exit 1
     fi
 
@@ -924,11 +1090,9 @@ function main() {
     fi
 
     ## Update the database and delete the oldest backup
+    ## [ disable sleep_lock ]
     ##
     post_backup_cleanup
-
-    ## TODO disable sleep lock ##
-
     
     exit 0
 }
