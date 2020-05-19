@@ -2,7 +2,7 @@
 
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-05-12
+# @Last Edit:    2020-05-19
 # @Dependencies: wakeonlan, systemd (systemd-resolve), getopt,
 #                notify-send.py (https://github.com/phuhl/notify-send.py)
 #                notify-send.py has to be in the $PATH
@@ -100,7 +100,6 @@ function error() {
 #   none - but sets the following
 #
 # Global Variables:
-#   DB_FOLDER_PATH
 #   DESTINATION_DIR
 #   DRY_RUN
 #   EXCLUDE_FILE
@@ -134,7 +133,7 @@ function parse_arguments() {
 server-user:,server-address:,server-mac:,\
 exclude-file:,log-file:,rsync-log-file:,\
 send-notifications,dry-run,\
-max-wake-wait:,db-path:,keep-n-backups:'\
+max-wake-wait:,keep-n-backups:'\
 		       --name "$0" -- "$@")
     
     if (( "$?" != 0 )); then
@@ -188,11 +187,6 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 		;;
 	    '--max-wake-wait')
 		MAX_WAKEUP_WAIT="$2"
-		shift 2
-		continue
-		;;
-	    '--db-path')
-		DB_FOLDER_PATH="$2"
 		shift 2
 		continue
 		;;
@@ -317,11 +311,6 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 
     ## 5) Settings with default values
     ##
-    if [[ -z "$DB_FOLDER_PATH" ]]; then
-	error "Invalid setting: db-folder path was unset."
-	return 1
-    fi
-
     if (( "$KEEP_N_BACKUPS" < 0 )); then
 	KEEP_N_BACKUPS=0
     fi
@@ -330,7 +319,6 @@ max-wake-wait:,db-path:,keep-n-backups:'\
 	MAX_WAKEUP_WAIT=0
     fi
 
-    readonly DB_FOLDER_PATH
     readonly KEEP_N_BACKUPS
     readonly MAX_WAKEUP_WAIT
 
@@ -448,7 +436,6 @@ function message() {
 #   none
 #
 # Global Variables:
-#   DB_FOLDER_PATH
 #   DESTINATION_DIR
 #   DRY_RUN
 #   EXCLUDE_FILE
@@ -485,7 +472,6 @@ function print_settings() {
 	used_settings+=("rsync exclude file  = ${EXCLUDE_FILE}\n")
     used_settings+=("max wakeup wait     = ${MAX_WAKEUP_WAIT}\n")
     used_settings+=(">> on server >>\n")
-    used_settings+=("db folder path      = ${DB_FOLDER_PATH}\n")
     used_settings+=("backups to keep     = ${KEEP_N_BACKUPS}\n")
     [[ ! -z "$RSYNC_LOG_FILE" ]] &&
 	used_settings+=("rsync log file      = ${RSYNC_LOG_FILE}\n")
@@ -638,12 +624,10 @@ function execute_on_host() {
 #   none
 #
 # Global Variables:
-#   DB_FOLDER_PATH
 #   DESTINATION_DIR
 #   RSYNC_LOG_FILE
 #   backup_folder
 #   current_folder
-#   db_file
 #
 # Depends:
 #   execute_on_host()
@@ -685,15 +669,6 @@ function pre_backup_setup() {
 	return 0
     }
 
-    ## backup-db
-    ##    
-    ensure_exists "${DB_FOLDER_PATH}"
-    touch "${db_file}"
-    if [[ ! -r "$db_file" ]] || [[ ! -w "$db_file" ]]; then 
-    	echo "Error no read/write permission for ${db_file}" >&2
-        exit 1
-    fi
-
     ## rsync folder-structure
     ##
     ensure_exists "${DESTINATION_DIR}/${current_folder}"
@@ -731,7 +706,7 @@ EOF
 
     execute_on_host "${cmd_string}" | message
     
-    return
+    return "${PIPESTATUS[0]}"
 }
 
 ################################################################################
@@ -809,9 +784,61 @@ function run_rsync() {
 
 
 
-### TODO ###
+################################################################################
+# Delete old incremental backups (rsync --backup) if more than specified
+# are present on the host.
+#
+# Arguments:
+#   none
+#
+# Global Variables:
+#   DESTINATION_DIR
+#   KEEP_N_BACKUPS
+#   backup_folder
+#
+# Depends:
+#   execute_on_host()
+#
+# Returns:
+#   Exit status of last command run on host
+#
 function post_backup_cleanup() {
-    return 0
+
+    local cmd_string
+
+    ## Remove old backups if present on the host
+    ##
+    read -r -d '' cmd_string <<-EOF    
+    ## List all folders of previous backups
+    ##
+    declare -a folders=("${DESTINATION_DIR}"/"${backup_folder}"/*)
+
+    ## Sort the dates (old -> recent)
+    ##
+    readarray -t sorted_dates < <(for folder in "${folders[@]}"; do echo "${folder##*/}"; done | sort)
+
+    ## Remove older backups if more are present than requested
+    ##
+    declare -i count=0
+    declare -a deleted_folders
+    while (( "${#sorted_dates[@]}" - $count > $KEEP_N_BACKUPS )); do
+	rm -rf "${DESTINATION_DIR}"/"${backup_folder}"/"${sorted_dates[${count}]}"
+	deleted_folders+=("${sorted_dates[${count}]}")
+	((count++))
+    done
+
+    ## Output for log if old folders were deleted
+    ##
+    if (( "${#deleted_folders[@]}" > 0 )); then
+	echo "Deleted following old backups:"
+	echo "${deleted_folders[@]}"
+    fi
+''
+EOF
+
+    execute_on_host "${cmd_string}" | message
+    
+    return "${PIPESTATUS[0]}"
 }
 
 
@@ -821,8 +848,6 @@ function main() {
 
     declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
-    local DB_FOLDER_PATH=".backup_db"   # path on server, file with backup dates for decision
-                                        # which to delete next
     local backup_folder="old"           # name for the subfolder with the kept dates
     local current_folder="current"      # name for the subfolder with the most up to date backup
     local current_date=$(date +"%Y-%m-%d")
@@ -879,28 +904,6 @@ function main() {
     ## Setup everything for the backup
     ## 
 
-    ## For incremental backups (rsync with backup and --backup-dir)
-    ## with a 'rolling cycle' (only keeping the last 'n' backups)
-    ## but kept in folders labeled by date, it is necessary to store a file with
-    ## the file names (= dates) of previously performed and kept backups.
-    ## Entries will be appended to this file, and if the list gets longer than
-    ## 'n' entries, folders matching the string from the top of the file will be
-    ## deleted.
-    ## From a design perspective this 'database structure' is envisaged to have two levels:
-    ## 1) a folder with the same name as the backing up client ($HOSTNAME) which is
-    ##    added outside this script in the calling script to retain flexibility for
-    ##    other possible setups.
-    ## and within this
-    ## 2) backup.history files to store the dates for backups (folders in 'old')
-    ## Of these, more than one file would only be needed if two different types of backup are
-    ## being run to the same server (e.g. one for /home/betty and another for /home/joe).
-    ## In this way (if clientnames are unique) using the SRC and DEST to build the filename
-    ## for the db_file ensures unambiguous db names.
-    ##
-    local db_file
-    db_file="${DB_FOLDER_PATH}/${SOURCE_DIR//\/%%}@@${DESTINATION_DIR//\/%%}.backup.history"
-    readonly db_file
-
     ## TODO enable sleep lock TODO
     pre_backup_setup
 
@@ -938,31 +941,4 @@ function main() {
 ## ENTRY POINT
 ##
 main "$@"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
