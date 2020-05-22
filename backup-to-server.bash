@@ -2,7 +2,7 @@
 
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-05-19
+# @Last Edit:    2020-05-22
 # @Dependencies: wakeonlan, systemd (systemd-resolve), getopt,
 #                notify-send.py (https://github.com/phuhl/notify-send.py)
 #                notify-send.py has to be in the $PATH
@@ -32,7 +32,7 @@
 # TODO
 # implement: switch for (if to wakeup); switch for (if to show notifications)
 
-readonly VERSION=1.2
+declare -a NOTIFICATION_ERROR_MSG
 
 ################################################################################
 # Things to check even on an uncontrolled exit
@@ -40,22 +40,317 @@ readonly VERSION=1.2
 # - if a sleep-lock is set on the server -> release it
 #
 function cleanup() {
-    if [[ ! -z $USE_SLEEPLOCK ]] &&
-	   $USE_SLEEPLOCK &&
+
+    declare -i exit_status="$?"
+
+    ## try to release a sleep lock
+    ##
+    if [[ ! -z "$USE_SLEEPLOCK" ]] &&
+	   ( $USE_SLEEPLOCK ) &&
 	   [[ ! -z "$sleep_lock_code" ]]
     then	
 	    ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock release ${sleep_lock_code}"
     fi
+
+    ## send a notification when exited on error
+    ##
+    if (( $exit_status != 0 )); then
+	notification "Error during backup:" "${NOTIFICATION_ERROR_MSG[*]}" "error"
+    fi	
 }
 
 trap cleanup EXIT
-    
 
-## TODO ##
+
+################################################################################
+# Test if the passed argument is an integer.
+#
+# Arguments:
+#   $1 - variable to test
+#
+# Returns:
+#   0 - true - if the variable IS an integer
+#   1 - false - if the variable is NOT and integer
+#
+function is_integer() {
+        if [[ "$1" =~ ^-?[0-9]+$ ]]; then
+	    return 0
+	else
+	    return 1
+	fi
+}
+
+################################################################################
+# Print the passed text to screen, broken on word boundaries to the
+# specified line length, and with preceding space in each new line
+# (if specified).
+#
+# Arguments:
+#   $1   - The text to format [string]
+#   $2   - line length [integer]
+#   [$3] - preceding space for lines [integer, optional, default: 0]
+#   [$4] - adjustment for first line [integer, optional, default: 0]
+#          (this is basically the difference in characters that would
+#           be needed to bring the first letter to start at the indent
+#           of the other lines)
+#          i.e.
+#          >preceeding space<|TEXT
+#
+#          <other text>      |this here is the first line
+#                            |this here is the second line
+#                      ...... <- (adjustment to align first line = 6)
+#
+# Output:
+#   Prints the formatted text to screen.
+#
+function print_formated_text() {
+    local text
+    declare -i line_length
+    declare -i preceding_space
+    declare -i space_adjust_first_line
+    declare -a words
+
+    if [[ -z "$1" ]]; then
+	return
+    fi
+
+    if [[ -z "$2" ]]; then
+	echo "print_formated_text Error: no line length passed!" >&2
+	exit 1
+    elif ( ! is_integer "$2" ); then
+	echo "print_formated_text Error: line length not an integer!" >&2
+	exit 1
+    fi
+
+    text="$1"
+    line_length="$2"
+
+    ## space on the left
+    ##
+    if [[ -z "$3" ]]; then
+	preceding_space=0
+    elif ( ! is_integer "$3" ); then
+	echo "print_formated_text Error: preceeding space is not an integer!" >&2
+	exit 1
+    else
+	preceding_space="$3"
+    fi
+
+    ## space adjustment for the first line
+    ##
+    if [[ -z "$4" ]]; then
+	space_adjust_first_line=0
+    elif ( ! is_integer "$4" ); then
+	echo "print_formated_text Error: space adjustment for first line is not an integer!" >&2
+	exit 1
+    else
+	space_adjust_first_line="$4"
+    fi
+
+    readonly text
+    readonly line_length
+    readonly preceding_space
+    readonly space_adjust_first_line
+
+    ## Split the text into separate words and put into an array.
+    ## (keep escaped characters as is)
+    ##
+    read -ra words -d '' <<<"$text"
+
+    ## write words until line length is reached, then break line
+    ##
+    declare -i current_line_length=0
+    declare -i word_length
+
+    ## if the first line has an indent, print it to screen
+    ##
+    current_line_length=$preceding_space
+    
+    if (( $space_adjust_first_line > 0 )); then
+	printf "%${space_adjust_first_line}s" ""	
+    elif (( $space_adjust_first_line < 0 )); then
+	current_line_length=$(( ${current_line_length} - ${space_adjust_first_line} ))
+    fi
+
+    for word in "${words[@]}"; do
+
+	word_length=$(expr length "$word")
+
+	if (( $current_line_length + $word_length > $line_length )); then
+	    printf "\n%${preceding_space}s" ""
+	    current_line_length=$preceding_space
+	fi
+	
+	printf "%s " "$word"
+	current_line_length=$(( $current_line_length + $word_length ))
+    done
+
+    return 0
+}
+
+
+
+################################################################################
+# Display usage information (-h, --help)
+#
 function usage() {
-    echo "Usage:"
-    echo "TEXT"
-    echo ""
+    local self="${0##*/}"
+    local usage_info
+    declare -a info
+    local description
+    declare -a examples
+    usage_info="${self} [-h] [-v] [OPTIONS] SRC [[USER@]HOST:]DEST"
+
+    info=(
+	"-h, --help"
+	"This information"
+	"-v, --version"
+	"Version of ${self}"
+	"" ""
+	"SRC"
+	"The local source directory e.g. '/home/user'."
+	"" ""
+	"DEST"
+	"The destination directory on the server.
+	   For a local backup something like '/backup/my_backup_folder';
+	   for a remote backup 'username@server:/backup/my_backup_folder' or 'server:backup'.
+	   If no login user is specified, the username will default to \$USER."
+	"" ""
+	"OPTIONS:" ""
+	"" ""
+	"-w, --wake-on-lan"
+	"Use 'wakeonlan' to wake the server if not reachable.
+	   This option has to be followed by the MAC address of
+	   the network device of the server.
+	   (also see 'man wakeonlan')"
+	"" ""
+	"--max-wake-wait"
+	"The maximum number of tries to perform when waking the
+	   server (--wake-on-lan).
+	   Every cycle takes about 2 seconds, hence 5 would mean wait 10 seconds before
+	   giving up. [default: ${MAX_WAKEUP_WAIT}]"
+	"" ""
+	"-e, --exclude-file"
+	"Path to the file which contains patterns to exclude from the backup
+	   (also see 'rsync --exclude-from')."
+	"" ""
+	"-l, --log-file"
+	"When specified the given /path/to/logfile will be used for log output."
+	"" ""
+	"--rsync-log-file"
+	"If specified, a separate log (produced by rsync) will be written on the server.
+	   path/to/the/logfile (on the server), also see 'rsync --remote-option=--log-file='."
+	"" ""
+	"--keep-n-backups"
+	"Number of old backups to keep (see 'rsync --backup').
+	   If daily backups are made this should be at least the number of days for which
+	   a rollback may be required. [default: ${KEEP_N_BACKUPS}]"
+	"" ""
+	"--send-notifications"
+	"(switch) Send notifications to the desktop when performing the backup?
+	   These are 'started...' 'finished...' 'error...' (see 'man notify-send').
+	   [default: false]"
+	"" ""
+	"--dry-run"
+	"(switch) Only show the chosen settings and check the connectivity to the server,
+	   but otherwise don't do anything. This doesn't test if rsync will run properly
+	   as in 'rsync --dry-run'! [default: false]"
+	"" ""
+	"--use-sleeplock"
+	"(switch) When waking a server via wake-on-lan that has autosuspend enabled,
+	   use a sleep-lock? (has to be enabled on server - TODO see package XXX). [default: false]"
+    )
+
+    readonly description="\
+	  This script is intended to be used to backup a local directory \
+	       to a backup server. The used server has wake-on-lan with \
+	       'magic packets' enabled, and can be expected \
+	       to be suspended when this script is called. \
+               Therefore, first it will be insured \
+	       that the server is woken and reachable before starting an rsync backup. \
+	       Furthermore, for a certain number of backups, copies of changed or \
+	       deleted files will be kept in an '/old' folder, while the current state \
+	       is saved in the folder '/current'. Hence the directory structure created \
+	       will be 'DEST/old/<date>' and 'DEST/current'."
+
+    examples=(
+	"${self} -u joe@server -m 01:02:03:04:05:06 -l backup.log /from/here /to/there)"
+	"${self} --server-user daisy --server-address 10.0.0.5 --server-mac 01:02:03:04:05:06 \
+	  /home/daisy /backup/daisy)"
+    )
+
+
+    ## Print usage information
+    ## left column - switch/argument
+    ## right column - explanation
+    ## - determine width of left column
+    ## - print even indeces (0. 2 , 4...) starting at left margin
+    ## - print odd indeces (1, 3, 5...) indented by the 'left column'
+    ##
+    local left    # text going into the respective column
+    local right
+    declare -i index=0
+    declare -i print_width=80   # total print width of usage info
+    declare -i left_column      # width of the left column
+    declare -i left_diff        # left column width - current left sting length
+
+    ## find the longest string in the left column
+    ##
+    left_column=0
+    declare -i string_length
+
+    while (( index < "${#info[@]}" )); do
+	string_length=$(expr length "${info[$index]}")
+	if (( $string_length > $left_column )); then
+	    left_column=$string_length
+	fi
+	(( index+=2 ))
+    done
+
+    ## add some spacing between left and right column
+    ##
+    (( left_column+=2 ))
+
+    ## reset the index we already used above
+    ##
+    index=0
+    
+    ## Print the info array (even indeces - left | odd - right)
+    ##
+    printf "\n"
+    
+    ## USAGE
+    ##
+    printf "USAGE:\n\n"
+    print_formated_text "$usage_info" $print_width 2 2
+    printf "\n\n\n"
+    
+    ## OPTIONS
+    ##
+    while (( $index < "${#info[@]}" )); do
+	left="${info[$index]}"
+	right="${info[$index+1]}"
+	left_diff=$(( $left_column - $(expr length "$left") - 3 ))
+	print_formated_text "$left" $print_width 2 2
+	print_formated_text "$right" $print_width $left_column $left_diff
+	printf "\n"
+	(( index+=2 ))
+    done
+
+    ## DESCRIPTION
+    ##
+    printf "\nDESCRIPTION:\n\n"
+    print_formated_text "$description" $print_width 2 2
+    
+    ## EXAMPLES
+    ##
+    printf "\n\nEXAMPLES:\n\n"
+    
+    for example in "${examples[@]}"; do
+#	echo "$example"
+	print_formated_text "$example" $print_width 2 2
+	printf "\n\n"
+    done
 }
 
 ################################################################################
@@ -64,16 +359,23 @@ function usage() {
 # Arguments:
 #   $1 -- text for the error message
 #
+# Global Variables:
+#   NOTIFICATION_ERROR_MSG
+#
 # Returns:
 #   nothing
 #
 function error() {
-    local text="$1"
+    local error_msg="$1"
+
+    ## append message to the global error message string
+    ##
+    NOTIFICATION_ERROR_MSG+=("\n${error_msg}\n")
     
-    echo "Error: ${text}" >&2
-    
-    if ($USE_LOGFILE); then
-	message "[ERROR]: " "${text}"
+    if ( $USE_LOGFILE ); then
+	message "[ERROR]: " "${error_msg}"
+    else
+	echo "Error: ${error_msg}" >&2	
     fi
 }
 
@@ -139,13 +441,13 @@ function parse_arguments() {
 
     if [[ -z "$1" ]]; then
 	error "No arguments provided, see ${0} --help for usage."
-	return 1
+	exit 1
     fi
     
     local arguments
-    arguments=$(getopt --options 'vhu:a:m:e:l:' \
+    arguments=$(getopt --options 'vhu:a:w:e:l:' \
 		       --longoptions 'version,help,\
-server-user:,server-address:,server-mac:,\
+server-user:,server-address:,wake-on-lan:,\
 exclude-file:,log-file:,rsync-log-file:,\
 send-notifications,dry-run,use-sleeplock\
 max-wake-wait:,keep-n-backups:'\
@@ -169,17 +471,7 @@ max-wake-wait:,keep-n-backups:'\
 		usage
 		exit 0
 		;;
-	    '-u'|'--server-user')
-		SERVER_USER="$2"
-		shift 2
-		continue
-		;;
-	    '-a'|'--server-address')
-		SERVER_ADDRESS="$2"
-		shift 2
-		continue
-		;;
-	    '-m'|'--server-mac')
+	    '-w'|'--wake-on-lan')
 		SERVER_MAC="$2"
 		shift 2
 		continue
@@ -242,10 +534,18 @@ max-wake-wait:,keep-n-backups:'\
     DESTINATION_DIR="$2"
     shift 2
 
+    ## Check that no arguments are left
+    ##
+    if [[ ! -z "$1" ]]; then
+	error "Unparsed argument: ${1}"
+	return 1
+    fi
+
+    
     ## Check the validity of all arguments
     ##
 
-    ## 1) SRC and DEST
+    ## 1) SRC
     ##
     if [[ -z "$SOURCE_DIR" ]]; then
 	error "No SRC specified, see ${0} --help for usage."
@@ -258,53 +558,66 @@ max-wake-wait:,keep-n-backups:'\
 	return 2
     fi
 
+    readonly SOURCE_DIR
+    
+    ## 2) DEST
+    ##
     if [[ -z "$DESTINATION_DIR" ]]; then
 	error "No DEST specified, see ${0} --help for usage."
 	return 2
     fi
 
-    ## remove trailing slashes from DEST if present
+    ## split DEST into parts for
+    ## SERVER_USER
+    ## SERVER_ADDRESS
+    ## DESTINATION_DIR
+    ##
+    ## Is a remote DEST specified?
+    ##
+    if [[ -n "${DESTINATION_DIR//[^:]}" ]]; then
+	SERVER_ADDRESS="${DESTINATION_DIR%:*}"
+	DESTINATION_DIR="${DESTINATION_DIR#*:}"
+    fi
+
+    ## Is a user@host specified?
+    ##
+    if [[ -n "${SERVER_ADDRESS//[^@]}" ]]; then
+	SERVER_USER="${SERVER_ADDRESS%@*}"
+	SERVER_ADDRESS="${SERVER_ADDRESS#*@}"
+    else
+	SERVER_USER="$USER"
+    fi
+    
+    ## Remove trailing slashes
     ##
     DESTINATION_DIR="${DESTINATION_DIR%%+(/)}"
-    
-    readonly SOURCE_DIR
+
+    ## Remove a leading ~/ if present
+    ##
+    DESTINATION_DIR="${DESTINATION_DIR#\~/}"
+
     readonly DESTINATION_DIR
-
-    ## 2) user and server
-    ##
-    if [[ -z "$SERVER_USER" ]]; then
-	SERVER_USER="${USER}"
-    fi
-    
-    ## Was user@server provided?
-    ## check if '@' in SERVER_USER, and if so
-    ## split into 'SERVER_USER'@'SERVER_ADDRESS'
-    ##
-    if [[ -z "$SERVER_ADDRESS" ]] && [[ -n "${SERVER_USER//[^@]}" ]]; then
-	SERVER_ADDRESS="${SERVER_USER#*@}"
-	SERVER_USER="${SERVER_USER%@*}"
-    fi
-
-    declare -r mac_regex='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$'
-    if [[ ! -z "$SERVER_MAC" ]] &&
-	   (( $(echo "${SERVER_MAC}" | grep -cP "$mac_regex") != 1 ))
-    then
-	error "The provided MAC address ${SERVER_MAC} is not a valid MAC."
-	return 2
-    fi
-
-    ## Insure that 'wakeonlan' is installed when a server mac is provided
-    ##
-    if (! is_installed wakeonlan); then
-	error "A MAC address for the server was provided," \
-	     "implying that WakeOnLAN should be used." \
-	     "However, the package 'wakeonlan' does not seem to be installed." \
-	     "Please install it before proceeding 'apt install wakeonlan'"
-	return 1
-    fi
-    
-    readonly SERVER_USER
     readonly SERVER_ADDRESS
+    readonly SERVER_USER
+
+    ## If a mac for wake-on-lan was provided, is it valid,
+    ## and is wakeonlan installed?
+    ##
+    if [[ ! -z "$SERVER_MAC" ]]; then
+	
+	declare -r mac_regex='^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$'
+	if (( $(echo "${SERVER_MAC}" | grep -cP "$mac_regex") != 1 )); then
+	    error "The provided MAC address for WakeOnLAN: ${SERVER_MAC} is not a valid MAC."
+	    return 2
+	fi
+
+	if (! is_installed wakeonlan); then
+	    error "WakeOnLAN was enabled, however, the package 'wakeonlan' does not seem to be installed." \
+		  "Please install it before proceeding 'apt install wakeonlan'"
+	    return 1
+	fi
+    fi
+    
     readonly SERVER_MAC
 
     ## If the backup is local or the server is not woken, ignore
@@ -364,7 +677,7 @@ max-wake-wait:,keep-n-backups:'\
     ## Ensure rsync is installed
     ##
     if (! is_installed rsync); then
-	error "Did not find 'rsync', please install it before proceeding."
+	error "Could not find 'rsync', please install it before proceeding."
 	return 1
     fi
     
@@ -434,16 +747,16 @@ function message() {
     ## Write to log if USE_LOGFILE or otherwise to stdout.
     ## When writing a log file only add the date (& time) for the first line of the entry.
     ##
-    if ($DRY_RUN && $USE_LOGFILE); then
+    if ( $DRY_RUN ) && ( $USE_LOGFILE ); then
 	local date_string=$(date +"%F %R:%S")
 	echo "Would be written to: ${LOGFILE}"
-	echo ""
     	for line in "${text_message[@]}"; do
     	    printf '%19s |  %s\n' "$date_string" "$line"
     	    date_string=""    # only add the date to the first line.
     	done
+	echo ""
 	
-    elif ($USE_LOGFILE); then
+    elif ( $USE_LOGFILE ) && [[ ! -z "$LOGFILE" ]]; then
     	local date_string=$(date +"%F %R:%S")
     	for line in "${text_message[@]}"; do
     	    printf '%19s |  %s\n' "$date_string" "$line" >> "$LOGFILE"
@@ -468,18 +781,27 @@ function message() {
 # Arguments:
 #   $1 - Summary (the 'header' shown) for the notification [string]
 #   $2 - Body of the notification message [string]
+#   $3 - Icon (name of icon to use) [optional]
 #
 # Global Variables:
 #   DISPLAY
 #   DBUS_SESSION_BUS_ADDRESS
+#   SEND_NOTIFICATIONS
 #
 # Output:
 #   none (apart from the popup)
 #
 function notification() {
 
+    ## Only send notifications when enabled
+    ##
+    if (! $SEND_NOTIFICATIONS ); then
+	return 0
+    fi
+    
     local summary
     local body
+    local icon
 
     if [[ -z "$1" ]] || [[ -z "$2" ]]; then
 	echo "notification() Error: not enough arguments passed!"
@@ -489,6 +811,14 @@ function notification() {
     readonly summary="$1"
     readonly body="$2"
 
+    ## Set icon if provided or otherwise default
+    ##
+    if [[ ! -z "$3" ]]; then
+	icon="$3"
+    else
+	icon="drive-harddisk"
+    fi
+    
     ## Under certain circumstances it can happen that for the user running
     ## this script DISPLAY or DBUS_SESSION_BUS_ADDRESS are not set.
     ## (e.g. when running as an anacron job)
@@ -556,13 +886,11 @@ function notification() {
     (
 	DISPLAY="$active_display"
 	DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address"
-	notify-send --icon=drive-harddisk "$summary" "$body"
+	notify-send --icon="$icon" "$summary" "$body"
     )
     
     return 0
 }
-
-
 
 ################################################################################
 # Print the current settings to screen or to log file.
@@ -626,44 +954,126 @@ function print_settings() {
 
     ## Print settings to screen or to log
     ##
-    ($DRY_RUN) && echo ""
-    if ($DRY_RUN || $USE_LOGFILE); then
+    ( $DRY_RUN ) && echo ""
+    if ( $DRY_RUN || $USE_LOGFILE ); then
 	message "${used_settings[@]}"
     fi
-    ($DRY_RUN) && echo ""
+    ( $DRY_RUN ) && echo ""
 
     return 0
 }    
 
+
 ################################################################################
-# Check if the specified server is reachable and ssh is listening on port 22.
-# If necessary wake it via wakeonlan, if a MAC is provided as second argument. 
+# Check if the passed argument is an IPv4 address in the range
+# 0.0.0.0 - 255.255.255.255
 #
 # Arguments:
-#   $1 - the hostname or ip address of the server
-#   $2 - the MAC address of the network device for wakeonlan [optional]
+#   $1 - string to check
+#
+# Returns:
+#   0 - true - if the passed string IS an IPv4 address
+#   1 - false - if NOT
+#
+function is_ipv4() {
+    declare -a -i fields
+    IFS='.' read -ra fields <<<"$1"
+
+    if (( "${#fields[@]}" != 4 )); then
+	return 1
+    fi
+    
+    for field in "${fields[@]}"; do
+	if (( "$field" < 0 )) || (( "$field" > 255 )); then
+	    return 1
+	fi
+    done
+
+    return 0
+}
+
+################################################################################
+# Check if the provided hostname can be resolved (by systemd-resolve
+#
+# Arguments:
+#   $1 - hostname to test
+#
+# Returns:
+#   0 - true - if the passed hostname is already a valid ipv4 address, or
+#              if the passed hostname could be successfully resolved
+#   1 - false - otherwise
+#
+function can_resolve_hostname() {
+    local hostname
+    declare -i count
+
+    if [[ -z "$1" ]]; then
+	echo "can_resolve_hostname Error: no argument passed!" >&2
+	exit 1
+    fi
+    
+    readonly hostname="$1"
+
+    ## If already an ip, we do not have to resolve it
+    ##
+    if ( is_ipv4 "$hostname" ); then
+	return 0
+    fi
+    
+    ## Ensure systemd-resolved service is running
+    ##
+    count=0
+    while ( ! $(systemctl is-active --quiet systemd-resolved.service) ) &&
+	      (( $count < 3 ))
+    do
+	systemctl start systemd-resolved.service && sleep 2
+    done
+
+    if ( ! $(systemctl is-active --quiet systemd-resolved.service) ); then
+	error "Can't get systemd-resolved.service started."
+	return 1
+    fi
+
+    ## Test if we can resolve the hostname
+    ##
+    if $(systemd-resolve "$hostname" &>/dev/null); then
+	return 0
+    else
+	return 1
+    fi
+}
+
+################################################################################
+# Check if the specified server is reachable and ssh is listening on port 22.
+# If necessary wake it via wakeonlan, if a MAC was provided.
+#
+# Arguments:
+#   none
 #
 # Global Variables:
 #   MAX_WAKEUP_WAIT
+#   SERVER_ADDRESS
+#   SERVER_MAC
+#   SERVER_USER
 #
 # Returns:
-#   0 - success - when server is reachable
+#   0 - success - when server is reachable and user@server can ssh into it
 #   1 - failure - when server is NOT reachable
 #
-function server_is_reachable() {
+function server_connection_ok() {
 
-    local hostname
-    local mac_address
-
-    if [[ -z "$1" ]]; then
-	echo "server_is_reachable() Error: no hostname provided." >&2
-	exit 1
+    ## If the provided server address is not an ip address
+    ## check that systemd-resolve can resolve it, as this
+    ## is most commonly an error on local networks.
+    ##
+    if ( ! can_resolve_hostname "$SERVER_ADDRESS" ); then
+	error "The passed server address: ${SERVER_ADDRESS} \
+is not a valid ip, and as hostname can't be \
+resolved by systemd-resolve."
+	return 1
     fi
-
-    readonly hostname="$1"
-    readonly mac_address="$2"
-
-    ## 1) Check that network interface is working
+    
+    ## 1) Check that the network interface is working
     ##
     if ( ! ping -c 1 localhost &>/dev/null ); then
 	error "Problem with network settings, can't reach localhost!"
@@ -674,21 +1084,21 @@ function server_is_reachable() {
     ##
     local server_online=false
     
-    if (ping -c 3 "$hostname"); then
+    if (ping -c 3 "$SERVER_ADDRESS" &>/dev/null); then
 	server_online=true
     fi
     
     ## 2a) Wake up if WakeOnLAN enabled
     ##
-    if ( ! $server_online ) && [[ ! -z "$mac_address" ]]; then
+    if ( ! $server_online ) && [[ ! -z "$SERVER_MAC" ]]; then
 	message "Server not reachable, trying to wake it up."
 	
 	declare -i counter=0
 	while ( ! $server_online ) && (( counter <= $MAX_WAKEUP_WAIT )); do
-	    wakeonlan "$mac_address" &>/dev/null
+	    wakeonlan "$SERVER_MAC" &>/dev/null
 	    sleep 2
 	    (( counter++ ))
-	    if ( ping -c 3 "$hostname" &>/dev/null ); then
+	    if ( ping -c 3 "$SERVER_ADDRESS" &>/dev/null ); then
 		server_online=true
 	    fi
 	done
@@ -696,21 +1106,36 @@ function server_is_reachable() {
 
     ## Check final reachability
     ##
-    if ( $server_online ); then
-	message "Server at ${hostname} is reachable."
-    else
-	error "Failed to connect to server."
+    if ( ! $server_online ); then
+	error "No reply when pinging server."
 	return 1
     fi
 
-    ### FIXME not needed when localhost
-    ## 3) make sure ssh is working
+    ## 3) Ensure ssh is working
     ##
-    if ( ! nc -zw 2 "$hostname" 22 &>/dev/null ); then
-	error "No ssh service detected on port 22 of ${hostname}."
+    if ( ! nc -zw 2 "$SERVER_ADDRESS" 22 &>/dev/null ); then
+	error "No ssh service detected on port 22 of ${SERVER_ADDRESS}."
 	return 1
     fi
 
+    ## 4) Ensure that provided user@host can log into server
+    ##
+    local msg
+    declare -i exit_status
+    msg=$(ssh -o BatchMode=yes -T "${SERVER_USER}@${SERVER_ADDRESS}" 'exit' 2>&1)
+    exit_status="$?"
+
+    if (( "$exit_status" > 0 )); then
+	## FIXME when failing, the ssh command also returns a weird return character
+	## which seems to be at the beginning of msg, and leads to deletion of
+	## text being written before the variable.
+	## Therefore, remove this unknown beginning to avoid strange effects.
+	##
+	msg="${msg#*[^a-zA-Z]}"
+	error $(printf "Can't connect via ssh: %s\n" "${msg}")
+	return 1
+    fi
+    
     return 0
 }
 
@@ -783,7 +1208,7 @@ function pre_backup_setup() {
 
     ## Enable a sleep lock on the server and save the code
     ##
-    if $USE_SLEEPLOCK; then
+    if ($USE_SLEEPLOCK); then
 	sleep_lock_code=$(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock enable")
 	lock_state=$(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock check $sleep_lock_code")
 	## Check that setting successful
@@ -973,23 +1398,24 @@ function post_backup_cleanup() {
 
     ## Sort the dates (old -> recent)
     ##
-    readarray -t sorted_dates < <(for folder in "${folders[@]}"; do echo "${folder##*/}"; done | sort)
+    read -a sorted_dates < <(sort <<<"\${folders[@]##*/}")
 
     ## Remove older backups if more are present than requested
     ##
     declare -i count=0
     declare -a deleted_folders
-    while (( "${#sorted_dates[@]}" - $count > $KEEP_N_BACKUPS )); do
-	rm -rf "${DESTINATION_DIR}"/"${backup_folder}"/"${sorted_dates[${count}]}"
-	deleted_folders+=("${sorted_dates[${count}]}")
-	((count++))
+    
+    while (( \${#sorted_dates[@]} - \$count > $KEEP_N_BACKUPS )); do
+	rm -rf "${DESTINATION_DIR}"/"${backup_folder}"/"\${sorted_dates[\${count}]}"
+	deleted_folders+=("\${sorted_dates[\${count}]}")
+	(( count++ ))
     done
 
     ## Output for log if old folders were deleted
     ##
-    if (( "${#deleted_folders[@]}" > 0 )); then
+    if (( "\${#deleted_folders[@]}" > 0 )); then
 	echo "Deleted following old backups:"
-	echo "${deleted_folders[@]}"
+	echo "\${deleted_folders[@]}"
     fi
 ''
 EOF
@@ -999,7 +1425,7 @@ EOF
 
     ## Disable a sleep-lock if set
     ##
-    if $USE_SLEEPLOCK; then
+    if ($USE_SLEEPLOCK); then
 	ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock release ${sleep_lock_code}"
 	lock_state=$(ssh -q "${SERVER_USER}@${SERVER_ADDRESS}" "sleep-lock check ${sleep_lock_code}")
 	# check that successful
@@ -1014,11 +1440,14 @@ EOF
     return $exit_status
 }
 
-
-
+################################################################################
+# Encapsulate the main logic of the script here to be able to keep most
+# variables local.
+#
 function main() {
-    echo "Entering function main()"  # XXX
 
+    declare -r VERSION="0.9"
+    
     declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
     local backup_folder="old"           # name for the subfolder with the kept dates
@@ -1054,20 +1483,39 @@ function main() {
 	error "while parsing arguments."
 	exit 1
     fi
-    
 
+    ## notification START
+    ##
+    notification "Backup started" "starting backup of ${SOURCE_DIR}"
+
+    
     ## Print settings to log (or to screen if --dry-run)
     ##
     print_settings
 
     
-    ## Make sure we can reach the server, (and ssh is enabled)
+    ## If not performing a local backup,
+    ## make sure we can reach the server, (and ssh is enabled).
     ##
-    if ( ! server_is_reachable "$SERVER_ADDRESS" "$SERVER_MAC" ); then
-	error "could not connect to server."
-	exit 1
+    if [[ ! -z "$SERVER_ADDRESS" ]]; then
+	## !! don't put server_connection_ok in a subshell as otherwise
+	## the text to NOTIFICATION_ERROR_MSG will not be appended
+	##
+	if server_connection_ok; then
+	    message "server is reachable"
+	else
+	    error "Failed to connect to server."
+	    exit 1
+	fi
     fi
 
+    ## Exit here when performing a dry-run
+    ##
+    if ( $DRY_RUN ); then
+	exit 0
+    fi
+
+    
     ## Setup everything for the backup
     ## [ enable sleep_lock ]
     ## 
@@ -1078,6 +1526,7 @@ function main() {
 	exit 1
     fi
 
+    
     ## Make the backup via rsync
     ##
     run_rsync
@@ -1089,16 +1538,19 @@ function main() {
 	message "Backup: rsync finished successfully."
     fi
 
+    
     ## Update the database and delete the oldest backup
     ## [ disable sleep_lock ]
     ##
     post_backup_cleanup
-    
+
+
+    ## notification FINISH
+    ##
+    notification "Backup finished" "Successfully finished backup of ${SOURCE_DIR}"
+
     exit 0
 }
-
-
-
 
 
 
