@@ -2,7 +2,7 @@
 
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-05-22
+# @Last Edit:    2020-05-27
 # @Dependencies: wakeonlan, systemd (systemd-resolve), getopt,
 #                notify-send.py (https://github.com/phuhl/notify-send.py)
 #                notify-send.py has to be in the $PATH
@@ -17,8 +17,6 @@
 # and if asleep will be woken up.
 # For the script to work ssh login on the server via a key-pair has to be set up.
 #
-# attribution for notify icon
-# Icons made by <a href="https://www.flaticon.com/authors/freepik" title="Freepik">Freepik</a> from <a href="https://www.flaticon.com/" title="Flaticon"> www.flaticon.com</a>
 # NOTE: careful with ssh using <<EOF as the send command will be send
 #       as text, which means that variables which are not escaped will be
 #       resolved at the local machine and send as text to the server,
@@ -29,9 +27,8 @@
 #       intentionally not implemented, rather use the option of a
 #       by user configuration via $HOME/.ssh/config !
 
-# TODO
-# implement: switch for (if to wakeup); switch for (if to show notifications)
-
+## Global variable to store messages for final error notification
+## 
 declare -a NOTIFICATION_ERROR_MSG
 
 ################################################################################
@@ -189,9 +186,17 @@ function print_formated_text() {
 }
 
 
-
 ################################################################################
 # Display usage information (-h, --help)
+#
+# Arguments:
+#   none
+#
+# Functions:
+#   print_formatted_text()
+#
+# Output:
+#   Prints usage information to screen.
 #
 function usage() {
     local self="${0##*/}"
@@ -347,7 +352,6 @@ function usage() {
     printf "\n\nEXAMPLES:\n\n"
     
     for example in "${examples[@]}"; do
-#	echo "$example"
 	print_formated_text "$example" $print_width 2 2
 	printf "\n\n"
     done
@@ -355,6 +359,8 @@ function usage() {
 
 ################################################################################
 # Send text to stderr and (if USE_LOGFILE=true) to the log file.
+# Appends text to NOTIFICATION_ERROR_MSG that can be printed/output during
+# cleanup().
 #
 # Arguments:
 #   $1 -- text for the error message
@@ -962,7 +968,6 @@ function print_settings() {
 
     return 0
 }    
-
 
 ################################################################################
 # Check if the passed argument is an IPv4 address in the range
