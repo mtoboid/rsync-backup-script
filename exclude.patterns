@@ -1,0 +1,58 @@
+## exclude-from file for rsync
+## 
+## Patterns and filenames to be excluded when making backups.
+## The current content of this file is geared for making a backup of the home
+## folder of a user on a debian based linux distro.
+##
+## @Version 1.1
+## @Loction /root/backup/exclude.patterns
+
+
+# DIRECTORIES
+
+## General
+
+# contains mounted file systems
+.gvfs                           
+.local/share/gvfs-metadata
+
+# session-specific
+.cache
+.dbus
+
+# really not needed
+.Trash
+.local/share/Trash
+
+# cached info about audio CDs
+.cddb
+
+## Dropbox (let dropbox re-create those to avoid problems)
+Dropbox
+.dropbox
+.dropbox-dist
+
+## Firefox
+.mozilla/firefox/*.default-release/lock
+.mozilla/firefox/*.default-release/datareporting
+.mozilla/firefox/*.default-release/saved-telemetry-pings
+.mozilla/firefox/*.default-release/sessionstore-backups
+.mozilla/firefox/*.default-release/storage
+
+
+##
+# FILES
+
+# caches
+.thumbnails
+
+# contains errors from the current graphical session
+.xsession-errors
+.xsession-errors.*
+
+# session-specific
+.gksu.lock
+.sudo_as_admin_successful
+.ICEauthority
+.Xauthority                 
+
