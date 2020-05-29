@@ -1,11 +1,12 @@
 ## exclude-from file for rsync
 ## 
-## Patterns and filenames to be excluded when making backups.
+## Patterns and filenames to be excluded when making backups of $HOME.
 ## The current content of this file is geared for making a backup of the home
-## folder of a user on a debian based linux distro.
+## folder of a user on a debian based linux distro using firefox as browser.
 ##
-## @Version 1.1
-## @Loction /root/backup/exclude.patterns
+## @Author:   Tobias Marczewski
+## @Version:  1.2
+## @Loction:  /root/backup/exclude-backup-home.patterns
 
 
 # DIRECTORIES

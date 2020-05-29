@@ -1,0 +1,85 @@
+#! /usr/bin/env bash
+#
+# Template / Example file to show how a script for a systemd.service could look.
+# This is only a suggestion, and heavily based on how I use the script.
+# Generally I see backups as an admin task, and therefore have all the scripts
+# and logic / logs under /root.
+# You may or may not like this approach, and feel free to change this as you see
+# fit.
+#
+# @Name:         backup.template
+# @Author:       Tobias Marczewski
+# @Last Edit:    2020-05-28
+# @Version:      0.1
+# @Dependencies: backup-to-server, systemd, exclude-backup-home.patterns
+# @Location:     /root/backup/scripts/backup.template
+#
+# Script to be called by a systemd service to run a backup of /home
+# to a local network server.
+#
+# Requires following files and directories to work:
+#    /root/backup/exclude-backup-home.patterns  (file with excludes for rsync)
+#    /root/backup/log                           (directory for log files)
+# 
+
+## GENERAL SETUP
+##
+server="testserver1"
+user="tester"
+local_backup_settings_dir="/root/backup"
+
+## BACKUP SPECIFIC
+##
+exclude_file="${local_backup_settings_dir}/exclude-backup-home.patterns"
+log_file="${local_backup_settings_dir}/log/backup_home.log"
+
+
+## on server
+##
+rsync_log="logs/backup/${HOSTNAME}/backup_home.log"
+
+
+## SOURCE
+##
+source_dir="/home"
+
+
+## DEST
+##
+dest_dir="backups/${HOSTNAME}"
+
+
+## RUN the backup script
+##
+backup-to-server --exclude-file "${exclude_file}" \
+		 --log-file "${log_file}" \
+		 --rsync-log-file "${rsync_log}" \
+		 --send-notifications \
+#		 --dry-run \
+		 "${source_dir}" \
+		 "${user}@${server}:${dest_dir}"
+
+
+## INFO / EXAMPLE
+## This script would reside in /root/backup/scripts/backup.template
+## To enable this script run
+##   ./setup.bash enable-systemd "/root/backup/scripts/backup.template"
+## -> this then creates a systemd.service and .timer for
+##    backup.service/backup.timer which would run daily
+##    $ systemctl list-timers
+##
+##   Assuming our normal login user is joe@somemachine
+## - every time this script runs it will backup /home (for all users) to
+##   testserver1 and append to the logfile /root/backup/log/backup_home.log
+## - a notification would be send when the backup starts, and again
+##   when it completed.
+## + on the server the most current backup will be placed in
+##       /home/tester/backups/somemachine/current/home
+##   and backups of changed or deleted files would be in
+##       /home/tester/backups/somemachine/old/<date1>/home
+##                                         |
+##                                         +-/<date2>/home/
+##                                         ...
+## + and a log would be placed under /home/tester/logs/backup/somemachine/backup_home.log
+##
+
