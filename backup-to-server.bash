@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-
+#
+# Backup a local directory to a server with rsync while preserving changed/deleted files
+# for a specified number of backups.
+#
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
 # @Last Edit:    2020-05-27
-# @Dependencies: wakeonlan, systemd (systemd-resolve), getopt,
-#                notify-send.py (https://github.com/phuhl/notify-send.py)
-#                notify-send.py has to be in the $PATH
-#                sleep-lock.bash (on server)
+# @Version:      see VERSION=
+# @Dependencies: systemd (systemd-resolve), getopt,
+#                [wakeonlan, sleep-lock.bash (on server)]
 # @Location:     /usr/local/bin/backup-to-server
 
 # Shellscript to connect to a local server and run rsync to perform a backup
@@ -372,7 +374,7 @@ function usage() {
 #   nothing
 #
 function error() {
-    local error_msg="$1"
+    local error_msg="$*"
 
     ## append message to the global error message string
     ##
@@ -446,7 +448,7 @@ function is_installed() {
 function parse_arguments() {
 
     if [[ -z "$1" ]]; then
-	error "No arguments provided, see ${0} --help for usage."
+	error "No arguments provided, see ${0##*/} --help for usage."
 	exit 1
     fi
     
@@ -748,6 +750,12 @@ function message() {
     		text_message+=("${line# }")
     	    done <<<"${pipe_text//\\n/$'\n'}"
 	done <<<"$(cat /dev/stdin)"
+    fi
+
+    ## If there is no message to print, just return
+    ##
+    if [[ -z  "${text_message[*]}" ]]; then
+	return
     fi
     
     ## Write to log if USE_LOGFILE or otherwise to stdout.
@@ -1404,6 +1412,7 @@ function post_backup_cleanup() {
     ## Sort the dates (old -> recent)
     ##
     read -a sorted_dates < <(sort <<<"\${folders[@]##*/}")
+    echo "Number of backups in ${backup_folder}: \${#sorted_dates[@]}"
 
     ## Remove older backups if more are present than requested
     ##
@@ -1425,7 +1434,7 @@ function post_backup_cleanup() {
 ''
 EOF
 
-    execute_on_host "${cmd_string}" | message
+    execute_on_host "${cmd_string}" | message "[SERVER]"
     exit_status="${PIPESTATUS[0]}"
 
     ## Disable a sleep-lock if set
@@ -1491,6 +1500,7 @@ function main() {
 
     ## notification START
     ##
+    message "[START] Backup started"
     notification "Backup started" "starting backup of ${SOURCE_DIR}"
 
     
@@ -1540,7 +1550,7 @@ function main() {
 	error "rsync finished with exit status $?."
 	exit 1
     else
-	message "Backup: rsync finished successfully."
+	message "rsync finished successfully."
     fi
 
     
@@ -1552,6 +1562,7 @@ function main() {
 
     ## notification FINISH
     ##
+    message "[END] Backup finished\n\n"
     notification "Backup finished" "Successfully finished backup of ${SOURCE_DIR}"
 
     exit 0
