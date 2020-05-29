@@ -54,6 +54,7 @@ function cleanup() {
     ## send a notification when exited on error
     ##
     if (( $exit_status != 0 )); then
+	$USE_LOGFILE && message "[EXIT] Backup exited on error!\n\n"
 	notification "Error during backup:" "${NOTIFICATION_ERROR_MSG[*]}" "error"
     fi	
 }
@@ -642,7 +643,7 @@ max-wake-wait:,keep-n-backups:'\
 	if [[ -z "$LOGFILE" ]]; then
 	    error "No logfile provided see ${0} for usage."
 	    return 2
-	elif ( ! touch "$LOGFILE" &>/dev/null ); then
+	elif ( ! $DRY_RUN ) && ( ! touch "$LOGFILE" &>/dev/null ); then
 	    error "Can't create or write to logfile: ${LOGFILE}."
 	    return 1
 	fi
@@ -788,6 +789,8 @@ function message() {
 # Send a notification to the user via a popup.
 # Produces a notification popup for the currently logged-in user who
 # is using a display.
+# Also see
+#   https://stackoverflow.com/questions/28195805/running-notify-send-as-root
 #
 # Depends:
 #   notify-send
@@ -833,11 +836,15 @@ function notification() {
 	icon="drive-harddisk"
     fi
     
-    ## Under certain circumstances it can happen that for the user running
+    ## Especially when run as root, it can happen that for the user running
     ## this script DISPLAY or DBUS_SESSION_BUS_ADDRESS are not set.
     ## (e.g. when running as an anacron job)
     ## Therefore, we test if those are set and if not, try to assign
     ## the display and dbus_session_bus_address of a/the logged in user.
+    ## We then send a notification as this user, hence we have to have
+    ## the permissions to execute a command with 'sudo -u $user ...'
+    ## which should usually be the case when root.
+    ##
     ## Note:
     ## Especially were the dbus for the user is registered varies between
     ## different DEs (Distros?) and I am not sure if the approach immplemented
@@ -847,8 +854,17 @@ function notification() {
     local user
     local uid
     local dbus_session_bus_address
+    local notify_exec
     
     if [[ -z "$DISPLAY" ]] || [[ -z "$DBUS_SESSION_BUS_ADDRESS" ]]; then
+
+	## Make sure we have the privileges to run a command as
+	## another user
+	##
+	if (( $EUID != 0 )); then
+	    error "No DISPLAY or DBUS_SESSION_BUS_ADDRESS set, but not run as root."
+	    return 1
+	fi
 	
 	## Check if the glob pattern matches anything at all
 	##
@@ -889,20 +905,17 @@ function notification() {
 	    error "could not find the correct dbus_session_bus_address. [notification]"
 	    return 1
 	fi
+
+	notify_exec="sudo -u ${user} DISPLAY=${active_display} DBUS_SESSION_BUS_ADDRESS=${dbus_session_bus_address} notify-send"
+	
     else
-	active_display="$DISPLAY"
-	dbus_session_bus_address="$DBUS_SESSION_BUS_ADDRESS"
+	notify_exec='notify-send'
     fi
 
-    ## Send a notification in a subshell, where the parameters are
-    ## ensured to be set.
+    ## Send a notification
     ##
-    (
-	DISPLAY="$active_display"
-	DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address"
-	notify-send --icon="$icon" "$summary" "$body"
-    )
-    
+    $notify_exec --icon="$icon" "$summary" "$body"
+	     
     return 0
 }
 
@@ -1501,8 +1514,12 @@ function main() {
     ## notification START
     ##
     message "[START] Backup started"
-    notification "Backup started" "starting backup of ${SOURCE_DIR}"
-
+    if ( $DRY_RUN ); then
+	notification "Dry Run" "Notifications are enabled"
+    else
+	notification "Backup started" "starting backup of ${SOURCE_DIR}"
+    fi
+    
     
     ## Print settings to log (or to screen if --dry-run)
     ##
