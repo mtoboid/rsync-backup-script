@@ -1061,12 +1061,17 @@ function can_resolve_hostname() {
     fi
 
     ## Test if we can resolve the hostname
+    ## (give it a few tries as sometimes systemd-resolve can return
+    ##  false on the first try)
     ##
-    if $(systemd-resolve "$hostname" &>/dev/null); then
-	return 0
-    else
-	return 1
-    fi
+    for try in {1..4}; do
+	if $(systemd-resolve "$hostname" &>/dev/null); then
+	    return 0
+	fi
+	sleep 1
+    done
+    
+    return 1
 }
 
 ################################################################################
