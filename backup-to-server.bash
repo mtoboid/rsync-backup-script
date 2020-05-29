@@ -458,7 +458,7 @@ function parse_arguments() {
 		       --longoptions 'version,help,\
 server-user:,server-address:,wake-on-lan:,\
 exclude-file:,log-file:,rsync-log-file:,\
-send-notifications,dry-run,use-sleeplock\
+send-notifications,dry-run,use-sleeplock,\
 max-wake-wait:,keep-n-backups:'\
 		       --name "$0" -- "$@")
     
