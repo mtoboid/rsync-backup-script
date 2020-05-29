@@ -101,14 +101,14 @@ function enable_systemd_timer() {
     local service_unit_file
     local timer_unit_file
 
-    
-
     if [[ -z "$1" ]]; then
 	echo "enable_systemd_timer() Error: No script provided!" >&2
 	return 1
     fi
 
-    readonly script_path=$(realpath "$1")
+    ## get the full path
+    ##
+    readonly script_path=$(sudo realpath "$1")
     
     if [[ ! -f "$script_path" ]]; then
 	echo "enable_systemd_timer() Error: script file ${script_path} not found." >&2
@@ -216,9 +216,9 @@ function do_install() {
 	script_path="${SETUP_SCRIPT_DIR}/${script}"
 	install_path="${SCRIPTS[$script]}"
 	if [[ -e "$install_path" ]]; then
-	    install_mode="update"
+	    install_mode="updated"
 	else
-	    install_mode="install"
+	    install_mode="installed"
 	fi
 	
 	sudo install --mode=755 "$script_path" "$install_path"
@@ -228,7 +228,7 @@ function do_install() {
 	    return 1
 	fi
 
-	echo "Successfully ${install_mode}d ${install_path##*/}."
+	echo "Successfully ${install_mode} ${install_path##*/}."
     done
     
     return 0
