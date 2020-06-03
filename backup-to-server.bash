@@ -389,6 +389,20 @@ function error() {
 }
 
 ################################################################################
+# Send a warning
+# [see error()]
+#
+function warning() {
+    local warn_msg="$*"
+    if ( $USE_LOGFILE ); then
+	message "[WARNING]: " "${warn_msg}"
+    else
+	echo "Warning: ${warn_msg}" >&2	
+    fi
+}
+
+
+################################################################################
 # Check if a program is available on the system.
 #
 # Arguments:
@@ -679,6 +693,14 @@ max-wake-wait:,keep-n-backups:'\
 	      "Please install 'libnotify-bin' before proceeding."
 	return 1
     fi
+
+    ## Check that at least one user is logged in who could receive
+    ## a notification.
+    ##
+    if (( $(users | wc -w) < 1 )); then
+	warning "No user logged into the system, disabling notifications."
+	SEND_NOTIFICATIONS=false
+    fi
     
     readonly SEND_NOTIFICATIONS
     readonly DRY_RUN
@@ -815,7 +837,7 @@ function notification() {
     if (! $SEND_NOTIFICATIONS ); then
 	return 0
     fi
-    
+
     local summary
     local body
     local icon
