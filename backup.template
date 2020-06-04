@@ -95,7 +95,7 @@ function main() {
 
     ## Is systemd-resolve in the right mood?
     ##
-    if (( (systemd-resolve "$backup_network_domain" &>/dev/null) != 0 )); then
+    if ( ! systemd-resolve "$backup_network_domain" &>/dev/null ); then
 	echo "Could not resolve ${backup_network_domain}." >&2
 	exit 105
     fi
