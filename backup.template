@@ -106,7 +106,6 @@ function main() {
 		     --log-file "${log_file}" \
 		     --rsync-log-file "${rsync_log}" \
 		     --send-notifications \
-		     #		 --dry-run \
 		     "${source_dir}" \
 		     "${user}@${server}:${dest_dir}"
 

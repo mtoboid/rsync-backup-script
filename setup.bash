@@ -4,8 +4,8 @@
 #
 # @Name:         setup.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-05-29
-# @Version:      0.1
+# @Last Edit:    2020-06-04
+# @Version:      0.2
 #
 # Arguments:
 #   "install"                               - install/update the scripts
@@ -110,7 +110,7 @@ function enable_systemd_timer() {
     ##
     readonly script_path=$(sudo realpath "$1")
     
-    if [[ ! -f "$script_path" ]]; then
+    if ( ! sudo test -f "$script_path" ); then
 	echo "enable_systemd_timer() Error: script file ${script_path} not found." >&2
 	return 1
     fi
@@ -119,6 +119,9 @@ function enable_systemd_timer() {
     readonly service_unit_file="${SYSTEMD_LIB_PATH}/${script_name%.*}.service"
     readonly timer_unit_file="${SYSTEMD_LIB_PATH}/${script_name%.*}.timer"
 
+    ## Insure the SYSTEMD_LIB_PATH exists
+    ##
+    [[ -e "$SYSTEMD_LIB_PATH" ]] || sudo mkdir -p "$SYSTEMD_LIB_PATH"
     ## Check if a service with the name already exists and if so ask the
     ## user how to proceed.
     ##
@@ -138,8 +141,8 @@ function enable_systemd_timer() {
 		sudo systemctl disable "${timer_unit_file##*/}" &>/dev/null
 		sudo systemctl disable "${service_unit_file##*/}" &>/dev/null
 		sleep 1
-		rm "${timer_unit_file}" &>/dev/null
-		rm "${service_unit_file}" &>/dev/null
+		sudo rm "${timer_unit_file}" &>/dev/null
+		sudo rm "${service_unit_file}" &>/dev/null
 		;;
 	    *)
 		echo "aborting..."
@@ -177,9 +180,9 @@ EOF
 Description=Run the backup script ${script_name}
 
 [Timer]
-Unit="${service_unit_file##*/}"
+Unit=${service_unit_file##*/}
 # run every day at 9:00 and at 17:00
-OnCalendar=*-*-* 9,17
+OnCalendar=*-*-* 9,17:00:00
 Persistent=true
 
 [Install]
