@@ -155,11 +155,18 @@ function enable_systemd_timer() {
     cat <<EOF | sudo tee "$service_unit_file" >/dev/null
 [Unit]
 Description=Run the backup script ${script_name}
-ConditionACPower=true
+After=network-online.target
+#ConditionACPower=true
 
 [Service]
 Type=simple
 ExecStart=${script_path}
+# checks if on wrong network (ExitStatus 100) and
+# if systemd-resolve not working (ExitStatus 105)
+# retry after some minutes if systemd-resolve problem
+Restart=no
+RestartSec=5min
+RestartForceExitStatus=105
 
 EOF
 
@@ -170,7 +177,10 @@ EOF
 Description=Run the backup script ${script_name}
 
 [Timer]
-OnCalendar=daily
+Unit="${service_unit_file##*/}"
+# run every day at 9:00 and at 17:00
+OnCalendar=*-*-* 9,17
+Persistent=true
 
 [Install]
 WantedBy=timers.target
@@ -188,6 +198,10 @@ EOF
 	return 1
     fi
 
+    echo "Following files where created:"
+    echo "${timer_unit_file}"
+    echo "${service_unit_file}"
+    echo ""
     echo "The service ${timer_unit_file##*/} is now enabled."
     echo "To disable it please use 'systemctl disable ${timer_unit_file##*/}'."
     
@@ -263,10 +277,10 @@ function main() {
 
     ## Get the path to the directory the script is located in
     ##
-    local SETUP_SCRIPT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)
+    declare -r  SETUP_SCRIPT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)
     declare -rA SCRIPTS=(["backup-to-server.bash"]="/usr/local/bin/backup-to-server")
-    declare -r SYSTEMD_LIB_PATH="/lib/systemd/system"
-    local mode="$1"
+    declare -r  SYSTEMD_LIB_PATH="/usr/local/lib/systemd/system"
+    declare -r  mode="$1"
 
     
     case "$mode" in

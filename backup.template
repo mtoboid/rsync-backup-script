@@ -9,8 +9,8 @@
 #
 # @Name:         backup.template
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-05-28
-# @Version:      0.1
+# @Last Edit:    2020-06-04
+# @Version:      0.2
 # @Dependencies: backup-to-server, systemd, exclude-backup-home.patterns
 # @Location:     /root/backup/scripts/backup.template
 #
@@ -21,44 +21,99 @@
 #    /root/backup/exclude-backup-home.patterns  (file with excludes for rsync)
 #    /root/backup/log                           (directory for log files)
 # 
+# Notes:
+#
+# On our home network with a Fritz!Box router, which doesn't support some features
+# as DNSSEC, EDNS0... systemd-resolved goes through phases when querying the
+# local DNS server (router):
+# 1) trying a non-supported feature-set (= no name resolution)
+# 2) degrading the feature set (= name resolution ok)
+# 3) going back to the non-supported advanced feature-set (-> back to 1)
+#
+# If the backup script would try to run a backup while resolution is temporarily
+# down, it would fail. Therefore this script checks:
+# 1) if we currently logged into the home network (backup_network_ssid)
+# 2) if systemd-resolve is currently in the mood of resolving local hostnames
+#
+# This script then returns (Exit code):
+#   100 - when we are not connected to the network the backup server is on
+#   105 - when we are connected to the right network, but systemd-resolve
+#         is currently in a "can't resolve local hostnames" mood
+#     0 - when everything was ok, and 'backup-to-server' finished without errors
+#     1 - when there were errors during 'backup-to-server' execution
+#
+# The idea is to use a systemd.service unit that restarts on failure, but only
+# when the exit code was 105 (systemd-resolve temporarily having a hissy fit):
+# [Service]
+# ...
+# Restart=no
+# RestartSec=5min
+# RestartForceExitStatus=105
+#
 
-## GENERAL SETUP
-##
-server="testserver1"
-user="tester"
-local_backup_settings_dir="/root/backup"
+function main() {
 
-## BACKUP SPECIFIC
-##
-exclude_file="${local_backup_settings_dir}/exclude-backup-home.patterns"
-log_file="${local_backup_settings_dir}/log/backup_home.log"
+    # SSID (Name) of the network (e.g. wifi)
+    local backup_network_ssid="home-net"
+    
+    # Domain name of the network
+    local backup_network_domain="fritz.box"
+    
+    # Name of the server to push the backups to
+    local server="backupserver1"
+    
+    # Username for the backup server
+    local user="backup-user"
+    
+    # Directory for logs, exclude files
+    local local_backup_settings_dir="/root/backup"
+
+    # Exclude file for rsync
+    local exclude_file="${local_backup_settings_dir}/exclude-backup-home.patterns"
+
+    # Log file for the backup
+    local log_file="${local_backup_settings_dir}/log/backup_home.log"
+
+    ## [on the server]
+    # location for log for this backup
+    local rsync_log="logs/backup/${HOSTNAME}/backup_home.log"
 
 
-## on server
-##
-rsync_log="logs/backup/${HOSTNAME}/backup_home.log"
+    ## SRC
+    local source_dir="/home"
+
+    ## DEST
+    local dest_dir="backups/${HOSTNAME}"
 
 
-## SOURCE
-##
-source_dir="/home"
+    ## Are we on the network the backup server is connected to?
+    ##
+    if [[ ! $(iwgetid --raw) == "$backup_network_ssid" ]]; then
+	echo "Not connected to the network ${backup_network_ssid}." >&2
+	exit 100
+    fi
 
+    ## Is systemd-resolve in the right mood?
+    ##
+    if (( (systemd-resolve "$backup_network_domain" &>/dev/null) != 0 )); then
+	echo "Could not resolve ${backup_network_domain}." >&2
+	exit 105
+    fi
 
-## DEST
-##
-dest_dir="backups/${HOSTNAME}"
+    ## RUN the backup
+    ##
+    backup-to-server --exclude-file "${exclude_file}" \
+		     --log-file "${log_file}" \
+		     --rsync-log-file "${rsync_log}" \
+		     --send-notifications \
+		     #		 --dry-run \
+		     "${source_dir}" \
+		     "${user}@${server}:${dest_dir}"
 
+    exit
+}
 
-## RUN the backup script
-##
-backup-to-server --exclude-file "${exclude_file}" \
-		 --log-file "${log_file}" \
-		 --rsync-log-file "${rsync_log}" \
-		 --send-notifications \
-#		 --dry-run \
-		 "${source_dir}" \
-		 "${user}@${server}:${dest_dir}"
-
+main
 
 ## INFO / EXAMPLE
 ## This script would reside in /root/backup/scripts/backup.template
