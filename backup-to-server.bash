@@ -439,6 +439,7 @@ function is_installed() {
 #   none - but sets the following
 #
 # Global Variables:
+#   BACKUP_FOLDER_NAME_FUNCTION
 #   DESTINATION_DIR
 #   DRY_RUN
 #   EXCLUDE_FILE
@@ -468,12 +469,12 @@ function parse_arguments() {
     fi
     
     local arguments
-    arguments=$(getopt --options 'vhu:a:w:e:l:' \
+    arguments=$(getopt --options 'vhw:e:l:' \
 		       --longoptions 'version,help,\
-server-user:,server-address:,wake-on-lan:,\
-exclude-file:,log-file:,rsync-log-file:,\
-send-notifications,dry-run,use-sleeplock,\
-max-wake-wait:,keep-n-backups:'\
+wake-on-lan:,exclude-file:,log-file:,\
+rsync-log-file:,max-wake-wait:,keep-n-backups:,\
+old-backups-name-function:,\
+send-notifications,use-sleeplock,dry-run'\
 		       --name "$0" -- "$@")
     
     if (( "$?" != 0 )); then
@@ -525,18 +526,23 @@ max-wake-wait:,keep-n-backups:'\
 		shift 2
 		continue
 		;;
+	    '--old-backups-name-function')
+		BACKUP_FOLDER_NAME_FUNCTION="$2"
+		shift 2
+		continue
+		;;
 	    '--send-notifications')
 		SEND_NOTIFICATIONS=true
 		shift
 		continue
 		;;
-	    '--dry-run')
-		DRY_RUN=true
+	    '--use-sleeplock')
+		USE_SLEEPLOCK=true
 		shift
 		continue
 		;;
-	    '--use-sleeplock')
-		USE_SLEEPLOCK=true
+	    '--dry-run')
+		DRY_RUN=true
 		shift
 		continue
 		;;
@@ -683,8 +689,23 @@ max-wake-wait:,keep-n-backups:'\
 	MAX_WAKEUP_WAIT=0
     fi
 
+    local testval
+    testval=$(${BACKUP_FOLDER_NAME_FUNCTION})
+    if (( "$?" != 0 )); then
+	error "Name function '${BACKUP_FOLDER_NAME_FUNCTION}'" \
+	      "did not provide a valid name."
+	return 2
+    fi
+
+    if [[ -z "$testval" ]]; then
+	error "Name Name function '${BACKUP_FOLDER_NAME_FUNCTION}'" \
+	      "produced an empty string."
+	return 2
+    fi
+
     readonly KEEP_N_BACKUPS
     readonly MAX_WAKEUP_WAIT
+    readonly BACKUP_FOLDER_NAME_FUNCTION
 
     ## Ensure 'libnotify-bin' is installed when notifications are requested
     ##
@@ -974,19 +995,20 @@ function print_settings() {
     declare -a used_settings
 
     used_settings+=("SETTINGS:\n")
-    used_settings+=("source directory    = ${SOURCE_DIR}\n")
-    used_settings+=("dest directory      = ${DESTINATION_DIR}\n")
-    used_settings+=("user                = ${SERVER_USER}\n")
-    used_settings+=("backup server       = ${SERVER_ADDRESS}\n")
+    used_settings+=("source directory     = ${SOURCE_DIR}\n")
+    used_settings+=("dest directory       = ${DESTINATION_DIR}\n")
+    used_settings+=("user                 = ${SERVER_USER}\n")
+    used_settings+=("backup server        = ${SERVER_ADDRESS}\n")
     [[ ! -z "$SERVER_MAC" ]] &&
-	used_settings+=("server mac address  = ${SERVER_MAC}\n")
+	used_settings+=("server mac address   = ${SERVER_MAC}\n")
     [[ ! -z "$EXCLUDE_FILE" ]] &&
-	used_settings+=("rsync exclude file  = ${EXCLUDE_FILE}\n")
-    used_settings+=("max wakeup wait     = ${MAX_WAKEUP_WAIT}\n")
+	used_settings+=("rsync exclude file   = ${EXCLUDE_FILE}\n")
+    used_settings+=("max wakeup wait      = ${MAX_WAKEUP_WAIT}\n")
     used_settings+=(">> on server >>\n")
-    used_settings+=("backups to keep     = ${KEEP_N_BACKUPS}\n")
+    used_settings+=("backups to keep      = ${KEEP_N_BACKUPS}\n")
+    used_settings+=("folder name function = ${BACKUP_FOLDER_NAME_FUNCTION}\n")
     [[ ! -z "$RSYNC_LOG_FILE" ]] &&
-	used_settings+=("rsync log file      = ${RSYNC_LOG_FILE}\n")
+	used_settings+=("rsync log file       = ${RSYNC_LOG_FILE}\n")
     used_settings+=(">> other >>\n")
     {
 	local state;
@@ -1358,7 +1380,7 @@ EOF
 #   SERVER_USER
 #   SOURCE_DIR
 #   backup_folder
-#   current_date
+#   backup_subfolder_name
 #   current_folder
 #
 # Returns:
@@ -1386,7 +1408,7 @@ function run_rsync() {
     ## to achive wanted behaviour for incremental backups
     ##
     rsync_opts+=("--delete" "--delete-excluded" "--delete-delay")
-    rsync_opts+=("--backup" "--backup-dir=../${backup_folder}/${current_date}")
+    rsync_opts+=("--backup" "--backup-dir=../${backup_folder}/${backup_subfolder_name}")
 
     ## If logging for the rsync process is wanted to that on the host.
     ## Set the log file path differently when not making backups to a remote server
@@ -1445,31 +1467,54 @@ function post_backup_cleanup() {
     ## Remove old backups if present on the host
     ##
     read -r -d '' cmd_string <<-EOF    
+    ## Tempfile for sorting according to creation date
+    ##
+    temp=\$(tempfile)
+    trap "rm -f \${temp}" EXIT
+
     ## List all folders of previous backups
     ##
     declare -a folders=("${DESTINATION_DIR}"/"${backup_folder}"/*)
 
-    ## Sort the dates (old -> recent)
+    ## Get last modification date of folders, and
+    ## sort into an array according to that
     ##
-    read -a sorted_dates < <(sort <<<"\${folders[@]##*/}")
-    echo "Number of backups in ${backup_folder}: \${#sorted_dates[@]}"
+    for folder in "\${folders[@]}"; do
+        printf "%d %s\n" \$(stat --printf="%Y" "\$folder") "\$folder" >> "\$temp"
+    done
+
+    ## Put only the folder paths into an array,
+    ## discarding the leading modification date '##* ' rem everything up to space
+    declare -a sorted_folders
+    while IFS= read -r line; do
+    	  sorted_folders+=("\${line##* }")
+    done < <(sort -k 1 "\$temp")
+
+    rm "\$temp"
+
+    ## Output for log
+    ##
+    echo "Number of backups in '${backup_folder}': \${#sorted_folders[@]}"
 
     ## Remove older backups if more are present than requested
     ##
     declare -i count=0
     declare -a deleted_folders
     
-    while (( \${#sorted_dates[@]} - \$count > $KEEP_N_BACKUPS )); do
-	rm -rf "${DESTINATION_DIR}"/"${backup_folder}"/"\${sorted_dates[\${count}]}"
-	deleted_folders+=("\${sorted_dates[\${count}]}")
+    while (( \${#sorted_folders[@]} - \$count > $KEEP_N_BACKUPS )); do
+	deleted_folders+=("\${sorted_folders[\$count]}")
 	(( count++ ))
+    done
+
+    for folder in "\${deleted_folders[@]}"; do
+	rm -rf "\$folder"
     done
 
     ## Output for log if old folders were deleted
     ##
     if (( "\${#deleted_folders[@]}" > 0 )); then
-	echo "Deleted following old backups:"
-	echo "\${deleted_folders[@]}"
+	echo "Deleted \${#deleted_folders[@]} old backup(s):"
+	echo "\${deleted_folders[@]##*/}"
     fi
 ''
 EOF
@@ -1506,10 +1551,10 @@ function main() {
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
     local backup_folder="old"           # name for the subfolder with the kept dates
     local current_folder="current"      # name for the subfolder with the most up to date backup
-    local current_date=$(date +"%Y-%m-%d")
+    local backup_subfolder_name=$(${BACKUP_FOLDER_NAME_FUNCTION})
     readonly backup_folder
     readonly current_folder
-    readonly current_date
+    readonly backup_subfolder_name
     
     ## 'Global' Variables set by parse_arguments()
     ##
@@ -1522,6 +1567,7 @@ function main() {
     local USE_LOGFILE=false
     local LOGFILE
     local RSYNC_LOG_FILE
+    local BACKUP_FOLDER_NAME_FUNCTION='date +%Y-%m-%d'
     local SEND_NOTIFICATIONS=false
     local DRY_RUN=false
     local USE_SLEEPLOCK=false
