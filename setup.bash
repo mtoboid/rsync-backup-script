@@ -178,6 +178,7 @@ EOF
     cat <<EOF | sudo tee "$timer_unit_file" >/dev/null
 [Unit]
 Description=Run the backup script ${script_name}
+After=network-online.target
 
 [Timer]
 Unit=${service_unit_file##*/}
