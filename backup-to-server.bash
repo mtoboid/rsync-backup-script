@@ -5,7 +5,7 @@
 #
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-05-27
+# @Last Edit:    2020-06-08
 # @Version:      see VERSION=
 # @Dependencies: systemd (systemd-resolve), getopt,
 #                [wakeonlan, sleep-lock.bash (on server)]
@@ -698,7 +698,7 @@ send-notifications,use-sleeplock,dry-run'\
     fi
 
     if [[ -z "$testval" ]]; then
-	error "Name Name function '${BACKUP_FOLDER_NAME_FUNCTION}'" \
+	error "Name function '${BACKUP_FOLDER_NAME_FUNCTION}'" \
 	      "produced an empty string."
 	return 2
     fi
@@ -1545,13 +1545,13 @@ EOF
 #
 function main() {
 
-    declare -r VERSION="0.9"
+    declare -r VERSION="0.9.1"
     
     declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
     local backup_folder="old"           # name for the subfolder with the kept dates
     local current_folder="current"      # name for the subfolder with the most up to date backup
-    local backup_subfolder_name=$(${BACKUP_FOLDER_NAME_FUNCTION})
+    local backup_subfolder_name
     readonly backup_folder
     readonly current_folder
     readonly backup_subfolder_name
@@ -1623,7 +1623,8 @@ function main() {
     
     ## Setup everything for the backup
     ## [ enable sleep_lock ]
-    ## 
+    ##
+    readonly backup_subfolder_name=$(${BACKUP_FOLDER_NAME_FUNCTION})
     pre_backup_setup
 
     if (( "$?" != 0 )); then
