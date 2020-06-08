@@ -1551,10 +1551,9 @@ function main() {
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
     local backup_folder="old"           # name for the subfolder with the kept dates
     local current_folder="current"      # name for the subfolder with the most up to date backup
-    local backup_subfolder_name
+    local backup_subfolder_name         # has to be set after parsing as it can be set by user
     readonly backup_folder
     readonly current_folder
-    readonly backup_subfolder_name
     
     ## 'Global' Variables set by parse_arguments()
     ##
@@ -1624,7 +1623,8 @@ function main() {
     ## Setup everything for the backup
     ## [ enable sleep_lock ]
     ##
-    readonly backup_subfolder_name=$(${BACKUP_FOLDER_NAME_FUNCTION})
+    backup_subfolder_name=$(${BACKUP_FOLDER_NAME_FUNCTION})
+    readonly backup_subfolder_name
     pre_backup_setup
 
     if (( "$?" != 0 )); then
