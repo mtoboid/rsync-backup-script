@@ -159,7 +159,7 @@ function enable_systemd_timer() {
 [Unit]
 Description=Run the backup script ${script_name}
 After=network-online.target
-#ConditionACPower=true
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -179,6 +179,7 @@ EOF
 [Unit]
 Description=Run the backup script ${script_name}
 After=network-online.target
+Wants=network-online.target
 
 [Timer]
 Unit=${service_unit_file##*/}
