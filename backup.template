@@ -9,8 +9,8 @@
 #
 # @Name:         backup.template
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-06-04
-# @Version:      0.2
+# @Last Edit:    2020-06-09
+# @Version:      0.3
 # @Dependencies: backup-to-server, systemd, exclude-backup-home.patterns
 # @Location:     /root/backup/scripts/backup.template
 #
@@ -35,7 +35,13 @@
 # 1) if we currently logged into the home network (backup_network_ssid)
 # 2) if systemd-resolve is currently in the mood of resolving local hostnames
 #
+# Additionally, to perform those checks, be sure not to check at bootup, but
+# only after the computer has been running already for some time (~5min) to
+# ensure we are connected to the network and so on...
+#
 # This script then returns (Exit code):
+#    95 - when the computer has only been booted up
+#         (running for less than 5 min)
 #   100 - when we are not connected to the network the backup server is on
 #   105 - when we are connected to the right network, but systemd-resolve
 #         is currently in a "can't resolve local hostnames" mood
@@ -48,7 +54,7 @@
 # ...
 # Restart=no
 # RestartSec=5min
-# RestartForceExitStatus=105
+# RestartForceExitStatus=95 105
 #
 
 function main() {
@@ -85,6 +91,24 @@ function main() {
     ## DEST
     local dest_dir="backups/${HOSTNAME}"
 
+    ################################################################################
+    ## Pre-Execution checks to enable a restart within the systemd.service
+    ################################################################################
+    
+    ## Systemd timers when set OnCalendar will sometimes trigger at boot,
+    ## but at this time the network sometimes isn't completely up and running,
+    ## despite requesting After=network-online.target.
+    ## Hence, exit when not already running for 5 min (=300 sec)
+    ## then the systemd.service can retry after a certain time
+
+    ## Get the number of seconds the system has been up
+    ##
+    local uptime_seconds=$(cat /proc/uptime | awk '{ print $1 }')
+
+    if (( "${uptime_seconds%.*}" < 300 )); then
+	echo "The system has not been up for 5 minutes." >&2
+	exit 95
+    fi
 
     ## Are we on the network the backup server is connected to?
     ##

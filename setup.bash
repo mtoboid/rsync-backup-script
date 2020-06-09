@@ -164,12 +164,14 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=${script_path}
+# Using the checks in backup.template:
+# checks if computer already up for 5 min (ExitStatus 95) and
 # checks if on wrong network (ExitStatus 100) and
 # if systemd-resolve not working (ExitStatus 105)
-# retry after some minutes if systemd-resolve problem
+# retry after some minutes if 95 or 105
 Restart=no
 RestartSec=5min
-RestartForceExitStatus=105
+RestartForceExitStatus=95 105
 
 EOF
 
