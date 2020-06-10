@@ -1,4 +1,4 @@
-#! /usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Template / Example file to show how a script for a systemd.service could look.
 # This is only a suggestion, and heavily based on how I use the script.

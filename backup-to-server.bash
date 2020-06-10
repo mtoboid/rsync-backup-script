@@ -5,7 +5,7 @@
 #
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-06-08
+# @Last Edit:    2020-06-10
 # @Version:      see VERSION=
 # @Dependencies: systemd (systemd-resolve), getopt,
 #                [wakeonlan, sleep-lock.bash (on server)]
@@ -80,110 +80,160 @@ function is_integer() {
 	fi
 }
 
+
 ################################################################################
-# Print the passed text to screen, broken on word boundaries to the
-# specified line length, and with preceding space in each new line
-# (if specified).
+# Print a word to screen, but behave in line breaking as if the text
+# were written in a column.
+# (HELPER for print_column_text())
+#
+# Arguments:
+#   $1 - word/text to print [string]
+#   $2 - leftmost position of the column [int]
+#   $3 - width of the column [int]
+#   $4 - current position in the column [*(int)pointer]
+#
+#                  screen
+#<<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>
+#|              $2                $3      |
+#|              :                 :       |
+#|              Here goes the text        |
+#|              and we are here           |
+#|                             ^          |
+#| position     0             $4          |
+#
+# Output:
+#   Writes the word to screen, and returns the position in the text.
+#
+function write_to_column() {
+    local word
+    declare -i column_start
+    declare -i column_width
+    declare -n current_pos
+    declare -i word_length
+
+    if [[ -z "$1" ]]; then
+	return
+    fi
+    
+    if [[ -z "$2" ]] || [[ -z "$3" ]] || [[ -z "$4" ]]; then
+	echo "write_to_column() Error: not enough arguments passed!" >&2
+	exit 1
+    fi
+    
+    word="$1"
+    column_start="$2"
+    column_width="$3"
+    current_pos="$4"    
+    word_length=$(expr length "$word")
+
+    ## If the word is to long to fit on the current row, break the line,
+    ## otherwise just print the word. (and adjust position)
+    ##
+    if (( $current_pos + 1 + $word_length > $column_width )); then
+	printf "\n%${column_start}s%s " "" "$word"
+	current_pos=$(( $word_length + 1 ))
+    else
+	printf "%s " "$word"
+	current_pos=$(( $current_pos + 1 + $word_length ))
+    fi
+    
+    return
+}
+
+
+################################################################################
+# Print the passed text to screen, pretending to be in a column that starts at
+# $2 and has (character) width $3. Break the lines on word bounderies  to fit
+# into the 'column', but honor \n as linebreak.
 #
 # Arguments:
 #   $1   - The text to format [string]
-#   $2   - line length [integer]
-#   [$3] - preceding space for lines [integer, optional, default: 0]
-#   [$4] - adjustment for first line [integer, optional, default: 0]
-#          (this is basically the difference in characters that would
-#           be needed to bring the first letter to start at the indent
-#           of the other lines)
-#          i.e.
-#          >preceeding space<|TEXT
-#
-#          <other text>      |this here is the first line
-#                            |this here is the second line
-#                      ...... <- (adjustment to align first line = 6)
+#   $2   - leftmost position of the column [int]
+#   $3   - column width [int]
+#   [$4] - current position in the column [*(int)pointer]
 #
 # Output:
 #   Prints the formatted text to screen.
 #
-function print_formated_text() {
+# Depends:
+#   write_to_column() - also see this function for more info about arguments.
+#
+function print_column_text() {
+    
     local text
-    declare -i line_length
-    declare -i preceding_space
-    declare -i space_adjust_first_line
+    declare -i column_start
+    declare -i column_width
     declare -a words
+    declare -n position
 
     if [[ -z "$1" ]]; then
 	return
     fi
 
+    ## Column start position
+    ##
     if [[ -z "$2" ]]; then
-	echo "print_formated_text Error: no line length passed!" >&2
+	echo "print_column_text Error: no column start position specified!" >&2
 	exit 1
     elif ( ! is_integer "$2" ); then
-	echo "print_formated_text Error: line length not an integer!" >&2
+    	echo "print_column_text Error: start position is not an integer!" >&2
+    	exit 1
+    fi
+
+    
+    if [[ -z "$3" ]]; then
+	echo "print_column_text Error: no column width specified!" >&2
 	exit 1
+    elif ( ! is_integer "$3" ); then
+    	echo "print_column_text Error: column width is not an integer!" >&2
+    	exit 1
     fi
 
     text="$1"
-    line_length="$2"
-
-    ## space on the left
-    ##
-    if [[ -z "$3" ]]; then
-	preceding_space=0
-    elif ( ! is_integer "$3" ); then
-	echo "print_formated_text Error: preceeding space is not an integer!" >&2
-	exit 1
-    else
-	preceding_space="$3"
-    fi
-
-    ## space adjustment for the first line
-    ##
-    if [[ -z "$4" ]]; then
-	space_adjust_first_line=0
-    elif ( ! is_integer "$4" ); then
-	echo "print_formated_text Error: space adjustment for first line is not an integer!" >&2
-	exit 1
-    else
-	space_adjust_first_line="$4"
-    fi
+    column_start="$2"
+    column_width="$3"
 
     readonly text
-    readonly line_length
-    readonly preceding_space
-    readonly space_adjust_first_line
+    readonly column_width
+    readonly column_start
+
+    if [[ -z "$4" ]]; then
+	declare -i zero=0
+	position=zero
+    else
+	position="$4"
+    fi
 
     ## Split the text into separate words and put into an array.
     ## (keep escaped characters as is)
     ##
     read -ra words -d '' <<<"$text"
 
-    ## write words until line length is reached, then break line
-    ##
-    declare -i current_line_length=0
-    declare -i word_length
-
-    ## if the first line has an indent, print it to screen
-    ##
-    current_line_length=$preceding_space
-    
-    if (( $space_adjust_first_line > 0 )); then
-	printf "%${space_adjust_first_line}s" ""	
-    elif (( $space_adjust_first_line < 0 )); then
-	current_line_length=$(( ${current_line_length} - ${space_adjust_first_line} ))
-    fi
-
     for word in "${words[@]}"; do
-
-	word_length=$(expr length "$word")
-
-	if (( $current_line_length + $word_length > $line_length )); then
-	    printf "\n%${preceding_space}s" ""
-	    current_line_length=$preceding_space
-	fi
 	
-	printf "%s " "$word"
-	current_line_length=$(( $current_line_length + $word_length ))
+    	## A word could be a string containing \n;
+    	## if this is the case, break it appart and honour all linebreaks.
+    	##
+    	if [[ "$word" == *"\n"* ]]; then
+	    local print_newline=false
+    	    while IFS=$'\n' read line; do
+		if $print_newline; then
+		    printf "\n%${column_start}s" ""
+		    position=0
+		fi
+		write_to_column "$line" "$column_start" "$column_width" position
+		print_newline=true
+    	    done < <( echo "${word//\\n/$'\n'}" )
+	    
+    	else
+    	    write_to_column "$word" "$column_start" "$column_width" position
+    	fi
+
     done
+
+    ## Fill the space to the end of the column
+    ##
+    printf "%$(( $column_width - $position ))s" ""
 
     return 0
 }
@@ -210,49 +260,55 @@ function usage() {
     usage_info="${self} [-h] [-v] [OPTIONS] SRC [[USER@]HOST:]DEST"
 
     info=(
-	"-h, --help"
-	"This information"
-	"-v, --version"
-	"Version of ${self}"
+	"-h, --help" "This information"
+	"-v, --version" "Version of ${self}"
 	"" ""
-	"SRC"
-	"The local source directory e.g. '/home/user'."
+	"SRC" "The local source directory e.g. '/home/user'."
 	"" ""
 	"DEST"
 	"The destination directory on the server.
-	   For a local backup something like '/backup/my_backup_folder';
-	   for a remote backup 'username@server:/backup/my_backup_folder' or 'server:backup'.
-	   If no login user is specified, the username will default to \$USER."
+	 For a local backup something like '/backup/my_backup_folder';
+	 for a remote backup 'username@server:~/backup/my_backup_folder' or
+	 'server:backup'.
+	 If no login user is specified, the username will default to \$USER."
 	"" ""
 	"OPTIONS:" ""
 	"" ""
 	"-w, --wake-on-lan"
 	"Use 'wakeonlan' to wake the server if not reachable.
-	   This option has to be followed by the MAC address of
-	   the network device of the server.
-	   (also see 'man wakeonlan')"
+	 This option has to be followed by the MAC address of
+	 the network device of the server.
+	 (also see 'man wakeonlan')"
 	"" ""
-	"--max-wake-wait"
+	"--max-wake-wait <int>"
 	"The maximum number of tries to perform when waking the
-	   server (--wake-on-lan).
-	   Every cycle takes about 2 seconds, hence 5 would mean wait 10 seconds before
-	   giving up. [default: ${MAX_WAKEUP_WAIT}]"
+	 server (--wake-on-lan).
+	 Every cycle takes about 2 seconds, hence 5 would mean wait 10 seconds before
+	 giving up.\n [default: ${MAX_WAKEUP_WAIT}]"
 	"" ""
-	"-e, --exclude-file"
+	"-e, --exclude-file <file>"
 	"Path to the file which contains patterns to exclude from the backup
-	   (also see 'rsync --exclude-from')."
+	 (also see 'rsync --exclude-from')."
 	"" ""
-	"-l, --log-file"
+	"-l, --log-file <file>"
 	"When specified the given /path/to/logfile will be used for log output."
 	"" ""
-	"--rsync-log-file"
+	"--rsync-log-file <path>"
 	"If specified, a separate log (produced by rsync) will be written on the server.
-	   path/to/the/logfile (on the server), also see 'rsync --remote-option=--log-file='."
+	 path/to/the/logfile (on the server), also see 'rsync --remote-option=--log-file='."
 	"" ""
-	"--keep-n-backups"
+	"--keep-n-backups <int>"
 	"Number of old backups to keep (see 'rsync --backup').
-	   If daily backups are made this should be at least the number of days for which
-	   a rollback may be required. [default: ${KEEP_N_BACKUPS}]"
+	 If daily backups are made this should be at least the number of days for which
+	 a rollback may be required. [default: ${KEEP_N_BACKUPS}]"
+	"" ""
+	"--old-backups-name-function <string>"
+	"Old versions of changed files or deleted files will be moved to a hierarchy
+	 under ${backup_folder}/<name>. The function for the name defaults to
+	 '${BACKUP_FOLDER_NAME_FUNCTION}', and should work for daily backups.
+	 If more frequent backups are made, this should be changed to a function
+	 that provides a new unique name every time a backup is made.\n
+	 [default: '${BACKUP_FOLDER_NAME_FUNCTION}']"
 	"" ""
 	"--send-notifications"
 	"(switch) Send notifications to the desktop when performing the backup?
@@ -297,31 +353,30 @@ function usage() {
     ##
     local left    # text going into the respective column
     local right
-    declare -i index=0
     declare -i print_width=80   # total print width of usage info
     declare -i left_column      # width of the left column
-    declare -i left_diff        # left column width - current left sting length
+    declare -i right_column     # width of the right column
+
+    ## seems to work with default, so don't use at the moment
+    #    declare -i position         # current position in the column
 
     ## find the longest string in the left column
     ##
     left_column=0
     declare -i string_length
 
-    while (( index < "${#info[@]}" )); do
+    for index in $(eval "echo {0..${#info[@]}..2}"); do
 	string_length=$(expr length "${info[$index]}")
 	if (( $string_length > $left_column )); then
 	    left_column=$string_length
 	fi
-	(( index+=2 ))
     done
 
-    ## add some spacing between left and right column
+    ## add some spacing between left and right column and
+    ## set the right column to occupy the rest of the space
     ##
     (( left_column+=2 ))
-
-    ## reset the index we already used above
-    ##
-    index=0
+    right_column=$(( $print_width - $left_column ))
     
     ## Print the info array (even indeces - left | odd - right)
     ##
@@ -330,32 +385,31 @@ function usage() {
     ## USAGE
     ##
     printf "USAGE:\n\n"
-    print_formated_text "$usage_info" $print_width 2 2
+    print_column_text "$usage_info" 0 $print_width
     printf "\n\n\n"
     
     ## OPTIONS
     ##
-    while (( $index < "${#info[@]}" )); do
+    for index in $(eval "echo {0..${#info[@]}..2}"); do
 	left="${info[$index]}"
 	right="${info[$index+1]}"
-	left_diff=$(( $left_column - $(expr length "$left") - 3 ))
-	print_formated_text "$left" $print_width 2 2
-	print_formated_text "$right" $print_width $left_column $left_diff
+
+	print_column_text "$left" 0 $left_column
+	print_column_text "$right" $left_column $right_column
 	printf "\n"
-	(( index+=2 ))
     done
 
     ## DESCRIPTION
     ##
     printf "\nDESCRIPTION:\n\n"
-    print_formated_text "$description" $print_width 2 2
+    print_column_text "$description" 0 $print_width
     
     ## EXAMPLES
     ##
     printf "\n\nEXAMPLES:\n\n"
     
     for example in "${examples[@]}"; do
-	print_formated_text "$example" $print_width 2 2
+	print_column_text "$example" 0 $print_width
 	printf "\n\n"
     done
 }
@@ -1545,7 +1599,7 @@ EOF
 #
 function main() {
 
-    declare -r VERSION="0.9.1"
+    declare -r VERSION="0.9.2"
     
     declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
