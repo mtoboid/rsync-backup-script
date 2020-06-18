@@ -5,7 +5,7 @@
 #
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-06-10
+# @Last Edit:    2020-06-18
 # @Version:      see VERSION=
 # @Dependencies: systemd (systemd-resolve), getopt,
 #                [wakeonlan, sleep-lock.bash (on server)]
@@ -143,15 +143,57 @@ function write_to_column() {
 
 ################################################################################
 # Print the passed text to screen, pretending to be in a column that starts at
-# $2 and has (character) width $3. Break the lines on word bounderies  to fit
+# $2 and has (character) width $3. Break the lines on word bounderies to fit
 # into the 'column', but honor \n as linebreak.
 #
 # Arguments:
 #   $1   - The text to format [string]
 #   $2   - leftmost position of the column [int]
 #   $3   - column width [int]
-#   [$4] - current position in the column [*(int)pointer]
+#   [$4] - cursor start position for the first line [int]
+#          This defaults to 0, and if no argument is provided the first line
+#          will get indented by $2  - see below.
+#          If provided,
+#          (positive int)
+#                         the position will be assumed to be already at $4,
+#                         and no indent will be printed;
 #
+#          (negative int) 
+#                         1) $2 + $4 > 0 [adjustment to the cursor start position]
+#                            add |$4| space, and set position to 0.
+#                            
+#                         2) $2 + $4 < 0 [indent the first line]
+#                            add |$4| space and set position to |column_start + position|
+#                         
+#                         Note:
+#                            $2 + $4 = 0 is actually the default case!
+#
+#
+#                            screen
+#          <<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>
+#          |              $2                $3      |
+#          |              :                 :       |
+#          |<...indent...>Here goes the text        |
+#          |              in several lines          |
+#          |              broken to fit in          |
+#          |           -     +                      |
+#          | position  3210123 ...                  |
+#          <<<<<<<<<<<<<<<<<<<<<>>>>>>>>>>>>>>>>>>>>>
+#          
+#          Cursor start position ($4)
+#          [cursor on screen at position O] [first letter at X]
+#                         0123456789...
+#
+#          |O<..indent...>X                       [default]
+#          |              next line...
+#          
+#          |______________.....OX     (no indent) [$4 = 5]
+#          |              next line...
+#          
+#          |_________O<..>X       (custom indent) [$4 = -4]
+#          |              next line...
+#          
+#          
 # Output:
 #   Prints the formatted text to screen.
 #
@@ -164,7 +206,7 @@ function print_column_text() {
     declare -i column_start
     declare -i column_width
     declare -a words
-    declare -n position
+    declare -i position
 
     if [[ -z "$1" ]]; then
 	return
@@ -173,19 +215,20 @@ function print_column_text() {
     ## Column start position
     ##
     if [[ -z "$2" ]]; then
-	echo "print_column_text Error: no column start position specified!" >&2
+	echo "print_column_text() Error: no column start position specified!" >&2
 	exit 1
     elif ( ! is_integer "$2" ); then
-    	echo "print_column_text Error: start position is not an integer!" >&2
+    	echo "print_column_text() Error: start position is not an integer!" >&2
     	exit 1
     fi
 
-    
+    ## Column width
+    ##
     if [[ -z "$3" ]]; then
-	echo "print_column_text Error: no column width specified!" >&2
+	echo "print_column_text() Error: no column width specified!" >&2
 	exit 1
     elif ( ! is_integer "$3" ); then
-    	echo "print_column_text Error: column width is not an integer!" >&2
+    	echo "print_column_text() Error: column width is not an integer!" >&2
     	exit 1
     fi
 
@@ -197,11 +240,36 @@ function print_column_text() {
     readonly column_width
     readonly column_start
 
-    if [[ -z "$4" ]]; then
-	declare -i zero=0
-	position=zero
+    ## Position within the column
+    ##
+    if [[ ! -z "$4" ]]; then
+	if ( ! is_integer "$4"); then
+	    echo "print_column_text() Error: cursor position is not an integer!" >&2
+	    exit 1
+	fi
+	
+	position=$4
+	
+	## If position argument is prefixed with minus:
+	## 1) if column_start + position > 0
+	##    adjustment to the cursor start position -
+	##    add space, and set position to 0.
+	##    
+	## 2) if column_start + position < 0
+	##    indent the first line -
+	##    add space and set position to |column_start + position|
+	##
+	## Note:
+	##    column_start + position = 0 is actually the default case!
+	##
+	if (( $position < 0 )); then
+	    printf "%$(( $position * -1 ))s" ""
+	    position=$(( ($position + $column_start) * -1 ))
+	    (( $position < 0 )) && position=0
+	fi
     else
-	position="$4"
+	position=0
+	printf "%${column_start}s" ""
     fi
 
     ## Split the text into separate words and put into an array.
@@ -246,7 +314,7 @@ function print_column_text() {
 #   none
 #
 # Functions:
-#   print_formatted_text()
+#   print_column_text()
 #
 # Output:
 #   Prints usage information to screen.
@@ -255,53 +323,44 @@ function usage() {
     local self="${0##*/}"
     local usage_info
     declare -a info
-    local description
-    declare -a examples
+
     usage_info="${self} [-h] [-v] [OPTIONS] SRC [[USER@]HOST:]DEST"
 
     info=(
 	"-h, --help" "This information"
 	"-v, --version" "Version of ${self}"
-	"" ""
 	"SRC" "The local source directory e.g. '/home/user'."
-	"" ""
 	"DEST"
 	"The destination directory on the server.
 	 For a local backup something like '/backup/my_backup_folder';
 	 for a remote backup 'username@server:~/backup/my_backup_folder' or
-	 'server:backup'.
-	 If no login user is specified, the username will default to \$USER."
-	"" ""
-	"OPTIONS:" ""
-	"" ""
-	"-w, --wake-on-lan"
+	 'server:backup/my_backup_folder'.
+	 If no login user is specified, the username will default to \$USER.
+	 When used for remote backups, ssh-key authentication for the user
+	 has to be set up, and to avoid unnecessary output .hushlogin."
+	"OPTIONS:" "@@header"
+	"-w, --wake-on-lan <mac-address>"
 	"Use 'wakeonlan' to wake the server if not reachable.
 	 This option has to be followed by the MAC address of
 	 the network device of the server.
 	 (also see 'man wakeonlan')"
-	"" ""
 	"--max-wake-wait <int>"
 	"The maximum number of tries to perform when waking the
 	 server (--wake-on-lan).
 	 Every cycle takes about 2 seconds, hence 5 would mean wait 10 seconds before
 	 giving up.\n [default: ${MAX_WAKEUP_WAIT}]"
-	"" ""
 	"-e, --exclude-file <file>"
 	"Path to the file which contains patterns to exclude from the backup
 	 (also see 'rsync --exclude-from')."
-	"" ""
 	"-l, --log-file <file>"
-	"When specified the given /path/to/logfile will be used for log output."
-	"" ""
+	"Redirect output to the given logfile."
 	"--rsync-log-file <path>"
-	"If specified, a separate log (produced by rsync) will be written on the server.
+	"When specified, a separate log (produced by rsync) will be written on the server.
 	 path/to/the/logfile (on the server), also see 'rsync --remote-option=--log-file='."
-	"" ""
 	"--keep-n-backups <int>"
 	"Number of old backups to keep (see 'rsync --backup').
 	 If daily backups are made this should be at least the number of days for which
 	 a rollback may be required. [default: ${KEEP_N_BACKUPS}]"
-	"" ""
 	"--old-backups-name-function <string>"
 	"Old versions of changed files or deleted files will be moved to a hierarchy
 	 under ${backup_folder}/<name>. The function for the name defaults to
@@ -309,40 +368,44 @@ function usage() {
 	 If more frequent backups are made, this should be changed to a function
 	 that provides a new unique name every time a backup is made.\n
 	 [default: '${BACKUP_FOLDER_NAME_FUNCTION}']"
-	"" ""
 	"--send-notifications"
-	"(switch) Send notifications to the desktop when performing the backup?
-	   These are 'started...' 'finished...' 'error...' (see 'man notify-send').
-	   [default: false]"
-	"" ""
+	"When specified, a notification will be send when the backup starts,
+	and one when it finished, or when an error occured (see 'man notify-send')."
 	"--dry-run"
-	"(switch) Only show the chosen settings and check the connectivity to the server,
-	   but otherwise don't do anything. This doesn't test if rsync will run properly
-	   as in 'rsync --dry-run'! [default: false]"
-	"" ""
+	"Only show the chosen settings and check the connectivity to the server,
+	 but otherwise don't do anything. This doesn't test if rsync will run properly
+	 as in 'rsync --dry-run'!"
 	"--use-sleeplock"
-	"(switch) When waking a server via wake-on-lan that has autosuspend enabled,
-	   use a sleep-lock? (has to be enabled on server - TODO see package XXX). [default: false]"
+	"When waking a server via wake-on-lan that has autosuspend enabled,
+	 use a sleep-lock? (has to be enabled on server - TODO see package XXX)."
+	"DESCRIPTION:" "@@header"
+	"This script is intended to be used to backup a local directory
+	 to a (home network) backup server. SSH-key authentication has been enabled for
+	 this backup server, and WakeOnLAN is supported. The script will check
+	 network connectivity and if the server can be reached before running rsync to
+	 perform a backup.
+         The backups are incremental, with old versions of changed files being kept
+	 for the specified number of backups. The default directory structure created
+	 on the server will be DEST/${backup_folder}/<date>s and DEST/${current_folder}."
+	"@@span"
+	"EXAMPLES:" "@@header"
+	"1) Make hourly backups of joe's work folder to backup-server:\n${self}
+	--old-backups-name-function 'date +%a-%T' /home/joe/work
+	joe@backup-server:~/backup/work" "@@span"
+	"2) Make daily backups of /home to a server that has WakeOnLAN enabled 
+	(network card MAC address 01:02:03:04:05:06);
+	exclude files and patterns listed in '/home/joe/exclude.patterns';
+	write output to example.log, and send a notification when the script starts,
+	and when it finishes:\n${self}
+	--exclude-file /home/joe/exclude.patterns --log-file example.log
+	--wake-on-lan 01:02:03:04:05:06 --send-notifications
+	/home/joe joe-backup@server:backup/home/"
+	"@@span"
+	"3) Just check if all paths are spelled correctly, and check if the server is
+	reachable:\n${self}
+	--dry-run $HOME backup-user@10.0.0.100:/testing"
+	"@@span"	
     )
-
-    readonly description="\
-	  This script is intended to be used to backup a local directory \
-	       to a backup server. The used server has wake-on-lan with \
-	       'magic packets' enabled, and can be expected \
-	       to be suspended when this script is called. \
-               Therefore, first it will be insured \
-	       that the server is woken and reachable before starting an rsync backup. \
-	       Furthermore, for a certain number of backups, copies of changed or \
-	       deleted files will be kept in an '/old' folder, while the current state \
-	       is saved in the folder '/current'. Hence the directory structure created \
-	       will be 'DEST/old/<date>' and 'DEST/current'."
-
-    examples=(
-	"${self} -u joe@server -m 01:02:03:04:05:06 -l backup.log /from/here /to/there)"
-	"${self} --server-user daisy --server-address 10.0.0.5 --server-mac 01:02:03:04:05:06 \
-	  /home/daisy /backup/daisy)"
-    )
-
 
     ## Print usage information
     ## left column - switch/argument
@@ -353,64 +416,91 @@ function usage() {
     ##
     local left    # text going into the respective column
     local right
-    declare -i print_width=80   # total print width of usage info
-    declare -i left_column      # width of the left column
-    declare -i right_column     # width of the right column
+    declare -i term_columns        # number of columns in the current terminal
+    declare -i print_width=80      # total print width of usage info
+    declare -i -r left_space=2     # space on the left before printing
+    declare -i indent=10           # indent of the 'rigth column'
+    declare -i left_column         # width of the left column
+    declare -i right_column        # width of the right column
+    declare -i position            # current position in the column
 
-    ## seems to work with default, so don't use at the moment
-    #    declare -i position         # current position in the column
-
+    ### OLD
+    ### determine width of left column by widest entry and set width
+    ### accordingly; then use two columns next to each other.
+    ### -> This resulted in the right column being much to narrow...
+    ### therefore don't use this layout for now.
+    ###
     ## find the longest string in the left column
     ##
-    left_column=0
-    declare -i string_length
+    # left_column=0
+    # declare -i string_length
 
-    for index in $(eval "echo {0..${#info[@]}..2}"); do
-	string_length=$(expr length "${info[$index]}")
-	if (( $string_length > $left_column )); then
-	    left_column=$string_length
-	fi
-    done
+    # for index in $(eval "echo {0..${#info[@]}..2}"); do
+    # 	string_length=$(expr length "${info[$index]}")
+    # 	if (( $string_length > $left_column )); then
+    # 	    left_column=$string_length
+    # 	fi
+    # done
 
     ## add some spacing between left and right column and
     ## set the right column to occupy the rest of the space
     ##
-    (( left_column+=2 ))
-    right_column=$(( $print_width - $left_column ))
+    #    (( left_column+=2 ))
+    #    right_column=$(( $print_width - $left_column ))
+    ### OLD
+
+    term_columns=$(tput cols)
+    if (( "$?" == 0 )) && (( $term_columns > 80 )); then
+	print_width=$(( $term_columns * 95 / 100 ))
+    fi
+    readonly print_width
     
-    ## Print the info array (even indeces - left | odd - right)
+    ## Set the two column widths
+    ##
+    #indent+=$left_space
+    readonly indent
+    left_column=$(( ($print_width - $left_space) / 2 ))
+    right_column=$(( $print_width - $indent ))
+    readonly left_column
+    readonly right_column
+    position=$left_space
+    
+    ## OUTPUT ----------------------------------------------------------------------
     ##
     printf "\n"
-    
+
     ## USAGE
     ##
-    printf "USAGE:\n\n"
-    print_column_text "$usage_info" 0 $print_width
+    print_column_text "USAGE:" $left_space $indent
+    print_column_text "$usage_info" $indent $print_width 0
     printf "\n\n\n"
     
-    ## OPTIONS
+    ## INFO
+    ## Print the info array (even indeces = left | odd = right)
     ##
     for index in $(eval "echo {0..${#info[@]}..2}"); do
 	left="${info[$index]}"
 	right="${info[$index+1]}"
-
-	print_column_text "$left" 0 $left_column
-	print_column_text "$right" $left_column $right_column
-	printf "\n"
-    done
-
-    ## DESCRIPTION
-    ##
-    printf "\nDESCRIPTION:\n\n"
-    print_column_text "$description" 0 $print_width
-    
-    ## EXAMPLES
-    ##
-    printf "\n\nEXAMPLES:\n\n"
-    
-    for example in "${examples[@]}"; do
-	print_column_text "$example" 0 $print_width
-	printf "\n\n"
+	
+	## use @@ tags in the 'right column' to have different behaviour
+	##
+	case "$right" in
+	    "@@header")
+		printf "\n"
+		print_column_text "$left" $left_space $left_column
+		printf "\n\n"
+		;;
+	    "@@span")
+		print_column_text "$left" $left_space $print_width
+		printf "\n\n"
+		;;
+	    *)
+		print_column_text "$left" $left_space $left_column
+		printf "\n"
+		print_column_text "$right" $indent  $right_column
+		printf "\n\n"
+		;;
+	esac
     done
 }
 
@@ -1599,7 +1689,7 @@ EOF
 #
 function main() {
 
-    declare -r VERSION="0.9.2"
+    declare -r VERSION="0.9.3"
     
     declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
