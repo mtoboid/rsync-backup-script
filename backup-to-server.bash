@@ -1616,23 +1616,29 @@ function post_backup_cleanup() {
     temp=\$(tempfile)
     trap "rm -f \${temp}" EXIT
 
+    ## Switch glob expansion to return nothing when * does not match
+    ##
+    shopt -s nullglob
+
     ## List all folders of previous backups
     ##
     declare -a folders=("${DESTINATION_DIR}"/"${backup_folder}"/*)
+    declare -a sorted_folders=()
 
-    ## Get last modification date of folders, and
-    ## sort into an array according to that
-    ##
-    for folder in "\${folders[@]}"; do
-        printf "%d %s\n" \$(stat --printf="%Y" "\$folder") "\$folder" >> "\$temp"
-    done
-
-    ## Put only the folder paths into an array,
-    ## discarding the leading modification date '##* ' rem everything up to space
-    declare -a sorted_folders
-    while IFS= read -r line; do
-    	  sorted_folders+=("\${line##* }")
-    done < <(sort -k 1 "\$temp")
+    if (( "${#folders[@]}" > 0 )); then
+        ## Get last modification date of folders, and
+        ## sort into an array according to that
+        ##
+        for folder in "\${folders[@]}"; do
+            printf "%d %s\n" \$(stat --printf="%Y" "\$folder") "\$folder" >> "\$temp"
+        done
+    
+        ## Put only the folder paths into an array,
+        ## discarding the leading modification date '##* ' rem everything up to space
+        while IFS= read -r line; do
+        	  sorted_folders+=("\${line##* }")
+        done < <(sort -k 1 "\$temp")
+    fi    
 
     rm "\$temp"
 
