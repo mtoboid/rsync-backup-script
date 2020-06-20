@@ -5,7 +5,7 @@
 #
 # @Name:         backup-to-server.bash
 # @Author:       Tobias Marczewski
-# @Last Edit:    2020-06-18
+# @Last Edit:    2020-06-20
 # @Version:      see VERSION=
 # @Dependencies: systemd (systemd-resolve), getopt,
 #                [wakeonlan, sleep-lock.bash (on server)]
@@ -1625,7 +1625,7 @@ function post_backup_cleanup() {
     declare -a folders=("${DESTINATION_DIR}"/"${backup_folder}"/*)
     declare -a sorted_folders=()
 
-    if (( "${#folders[@]}" > 0 )); then
+    if (( "\${#folders[@]}" > 0 )); then
         ## Get last modification date of folders, and
         ## sort into an array according to that
         ##
@@ -1695,7 +1695,7 @@ EOF
 #
 function main() {
 
-    declare -r VERSION="0.9.3"
+    declare -r VERSION="0.9.4"
     
     declare -i MAX_WAKEUP_WAIT=5        # how long to wait for the server 1 =~ 2 sec
     declare -i KEEP_N_BACKUPS=30        # number of backups before they will be overwritten
