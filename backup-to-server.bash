@@ -1722,6 +1722,8 @@ function main() {
     local USE_SLEEPLOCK=false
     # container for the sleep lock code, not set by parse_arguments()
     local sleep_lock_code
+    # container for exit status checks
+    local exit_status
     
     ## Set variables according to arguments and check their validity.
     ## Also check that all needed dependencies are installed.
@@ -1786,9 +1788,10 @@ function main() {
     ## Make the backup via rsync
     ##
     run_rsync
-
-    if (( "$?" != 0 )); then
-	error "rsync finished with exit status $?."
+    exit_status="$?"
+    
+    if (( "$exit_status" != 0 )); then
+	error "rsync finished with exit status $exit_status."
 	exit 1
     else
 	message "rsync finished successfully."
@@ -1799,7 +1802,12 @@ function main() {
     ## [ disable sleep_lock ]
     ##
     post_backup_cleanup
-
+    exit_status="$?"
+    
+    if (( "$exit_status" != 0 )); then
+	error "post backup cleanup finished with exit status $exit_status."
+	exit 1
+    fi
 
     ## notification FINISH
     ##
